@@ -10,6 +10,7 @@ from textwrap import dedent
 from typing import Any, Dict, List, Optional, Type, Set
 
 from envo import dependency_watcher
+from envo.dependency_watcher import Dependency
 from envo.misc import import_from_file
 
 
@@ -21,7 +22,7 @@ class Action:
     reloader: "PartialReloader"
 
     def execute(self) -> None:
-        pass
+        self.reloader.applied_actions.append(self)
 
     def __eq__(self, other: "Action") -> bool:
         raise NotImplementedError()
@@ -55,6 +56,7 @@ class Object:
             return f"Delete: {repr(self.object)}"
 
         def execute(self) -> None:
+            super().execute()
             delattr(self.parent.python_obj, self.object.name)
 
     python_obj: Any
@@ -148,6 +150,7 @@ class Function(FinalObj):
         object: "Function"
 
         def execute(self) -> None:
+            super().execute()
             setattr(self.parent.python_obj, self.object.name, self.object.python_obj)
 
     class Update(FinalObj.Update):
@@ -155,6 +158,7 @@ class Function(FinalObj):
         new_object: Optional["Function"]
 
         def execute(self) -> None:
+            super().execute()
             self.old_object.get_func(
                 self.old_object.python_obj
             ).__code__ = self.new_object.get_func(self.new_object.python_obj).__code__
@@ -254,40 +258,39 @@ class ContainerObj(Object):
         raise NotImplementedError()
 
     def _collect_objs(self) -> None:
-        try:
-            for n, o in self.get_dict().items():
-                if self._is_ignored(n):
+        for n, o in self.get_dict().items():
+            if self._is_ignored(n):
+                continue
+
+            if any(o is p for p in self.get_parents_obj_flat() + [self.python_obj]):
+                continue
+
+            if hasattr(o, "__module__") and o.__module__:
+                module_name = o.__module__.replace(".py", "").replace("/", ".").replace("\\", ".")
+                if not module_name.endswith(self.module.name):
                     continue
 
-                if any(o is p for p in self.get_parents_obj_flat() + [self.python_obj]):
-                    continue
+            obj_class: Type[Object]
+            if inspect.ismethod(o) or inspect.ismethoddescriptor(o):
+                obj_class = Method
+            elif inspect.isfunction(o):
+                obj_class = Function
+            elif inspect.isclass(o):
+                obj_class = Class
+            elif isinstance(o, dict):
+                obj_class = Dictionary
+            elif inspect.ismodule(o):
+                obj_class = Import
+            elif isinstance(self, Dictionary):
+                obj_class = DictionaryItem
+            elif isinstance(self, Class):
+                obj_class = ClassAttribute
+            else:
+                obj_class = Variable
 
-                if hasattr(o, "__module__") and o.__module__:
-                    module_name = o.__module__.replace(".py", "").replace("/", ".").replace("\\", ".")
-                    if not module_name.endswith(self.module.name):
-                        continue
-
-                obj_class: Type[Object]
-                if inspect.ismethod(o) or inspect.ismethoddescriptor(o):
-                    obj_class = Method
-                elif inspect.isfunction(o):
-                    obj_class = Function
-                elif inspect.isclass(o):
-                    obj_class = Class
-                elif isinstance(o, dict):
-                    obj_class = Dictionary
-                elif inspect.ismodule(o):
-                    obj_class = Import
-                elif isinstance(self, Dictionary):
-                    obj_class = DictionaryItem
-                else:
-                    obj_class = Variable
-
-                self.children[n] = obj_class(
-                    o, parent=self, name=n, reloader=self.reloader, module=self.module
-                )
-        except AttributeError as e :
-            a =  1
+            self.children[n] = obj_class(
+                o, parent=self, name=n, reloader=self.reloader, module=self.module
+            )
 
     @property
     def flat(self) -> Dict[str, Object]:
@@ -332,6 +335,7 @@ class Class(ContainerObj):
 class Dictionary(ContainerObj):
     class Add(ContainerObj.Add):
         def execute(self) -> None:
+            super().execute()
             setattr(self.parent.python_obj, self.object.name, self.object)
 
     def get_actions_for_update(
@@ -347,10 +351,12 @@ class Dictionary(ContainerObj):
 class Variable(FinalObj):
     class Add(FinalObj.Add):
         def execute(self) -> None:
+            super().execute()
             setattr(self.parent.python_obj, self.object.name, self.object.python_obj)
 
     class Update(FinalObj.Update):
         def execute(self) -> None:
+            super().execute()
             setattr(
                 self.old_object.parent.python_obj,
                 self.old_object.name,
@@ -372,7 +378,37 @@ class Variable(FinalObj):
             )
         ]
 
-        for m in self.reloader.get_dependent_modules():
+        for m in self.module.get_dependent_modules([self]):
+            module = Module(m, reloader=self.reloader)
+            ret.extend(module.get_actions_for_update())
+
+        return ret
+
+    @classmethod
+    def get_actions_for_add(
+        cls, reloader: "PartialReloader", parent: "ContainerObj", obj: "Object"
+    ) -> List["Action"]:
+        return [cls.Add(reloader=reloader, parent=parent, object=obj)]
+
+
+@dataclass
+class ClassAttribute(Variable):
+    def get_actions_for_update(
+        self, new_object: "Variable"
+    ) -> List["Action"]:
+        if self.python_obj == new_object.python_obj:
+            return []
+
+        ret = [
+            self.Update(
+                reloader=self.reloader,
+                parent=self.parent,
+                old_object=self,
+                new_object=new_object,
+            )
+        ]
+
+        for m in self.module.get_dependent_modules([self.parent]):
             module = Module(m, reloader=self.reloader)
             ret.extend(module.get_actions_for_update())
 
@@ -389,10 +425,12 @@ class Variable(FinalObj):
 class DictionaryItem(FinalObj):
     class Add(FinalObj.Add):
         def execute(self) -> None:
+            super().execute()
             self.parent.python_obj[self.object.name] = copy(self.object.python_obj)
 
     class Update(FinalObj.Update):
         def execute(self) -> None:
+            super().execute()
             self.old_object.parent.python_obj[
                 self.new_object.name
             ] = self.new_object.python_obj
@@ -420,6 +458,7 @@ class DictionaryItem(FinalObj):
 class Import(FinalObj):
     class Add(FinalObj.Add):
         def execute(self) -> None:
+            super().execute()
             module = sys.modules.get(self.object.name, self.object.python_obj)
             setattr(self.parent.python_obj, self.object.name, module)
 
@@ -442,8 +481,10 @@ class Module(ContainerObj):
         module: "Module"
 
         def execute(self) -> None:
+            super().execute()
             reloader = PartialReloader(self.module.python_obj, self.reloader.root)
             reloader.run()
+            self.reloader.applied_actions.extend(reloader.applied_actions)
 
         def __repr__(self) -> str:
             return f"Update: {repr(self.module)}"
@@ -478,6 +519,12 @@ class Module(ContainerObj):
                 continue
             ret.append(o)
         return ret
+
+    def get_dependent_modules(self, usages: List[Object]) -> List[ModuleType]:
+        from envo.dependency_watcher import Dependency
+        modules = dependency_watcher.get_dependencies(Dependency(name=self.name,
+                                                                      used_objs=set(o.name for o in usages)))
+        return modules
 
     @property
     def flat(self) -> Dict[str, Object]:
@@ -526,10 +573,12 @@ class Module(ContainerObj):
 
 class PartialReloader:
     module_obj: Any
+    applied_actions: List[Action]
 
     def __init__(self, module_obj: Any, root: Path) -> None:
         self.root = root
         self.module_obj = module_obj
+        self.applied_actions = []
 
     def _is_user_module(self, module: Any):
         if not hasattr(module, "__file__"):
@@ -546,18 +595,6 @@ class PartialReloader:
     @property
     def source_files(self) -> List[str]:
         ret = [str(p) for p in self.module_dir.glob("**/*.py")]
-        return ret
-
-    def get_dependent_modules(self) -> List[ModuleType]:
-        module_names = dependency_watcher.get_dependencies(self.module_obj)
-
-        ret = []
-
-        for n in module_names:
-            module = sys.modules.get(n, None)
-            if module:
-                ret.append(module)
-
         return ret
 
     @property

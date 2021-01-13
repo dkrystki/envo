@@ -1,3 +1,8 @@
+from pathlib import Path
+from types import ModuleType
+
+from dataclasses import dataclass
+
 from envo import misc
 
 try:
@@ -6,7 +11,7 @@ except ImportError:
     import __builtin__ as builtins
 
 from collections import defaultdict
-from typing import List, Optional, Any, Dict
+from typing import List, Optional, Any, Dict, Set
 
 import sys
 
@@ -20,6 +25,29 @@ _parent = None
 
 # PEP 328 changed the default level to 0 in Python 3.3.
 _default_level = -1 if sys.version_info < (3, 3) else 0
+
+
+@dataclass
+class Dependency:
+    name: str
+    used_objs: Set[str]
+
+    @property
+    def actual_name(self):
+        return misc.get_module_from_full_name(self.name)
+
+    @property
+    def module_obj(self) -> ModuleType:
+        return sys.modules[self.actual_name]
+
+    def is_used(self, dependency: "Dependency") -> bool:
+        if dependency.used_objs:
+            if "*" in dependency.used_objs:
+                return True
+            return bool(self.used_objs & dependency.used_objs)
+        else:
+            source = Path(dependency.module_obj.__file__).read_text()
+            return any(f"{self.actual_name}.{o}" in source for o in list(self.used_objs))
 
 
 def enable(blacklist=None) -> None:
@@ -44,37 +72,38 @@ def disable():
     _dependencies.clear()
     _parent = None
 
+def _reset():
+    global _dependencies
+    _dependencies = defaultdict(list)
 
-def flatten(m, visited: Optional[List[str]] = None):
+
+def flatten(dependency: Dependency, visited: Optional[List[Dependency]] = None) -> List[Dependency]:
     if not visited:
         visited = []
 
-    ret = _dependencies.get(misc.get_module_from_full_name(m).__name__, [])
+    ret = _dependencies.get(dependency.actual_name, [])
     for v in visited:
         while v in ret: ret.remove(v)
 
     for mr in ret:
         visited.append(mr)
         flat = flatten(mr, visited.copy())
-        for fm in flat:
-            if fm in ret:
-                continue
-            ret.append(fm)
+        ret.extend(flat)
 
     return ret
 
-def get_dependencies(m) -> List[Any]:
+def get_dependencies(dependency: Dependency) -> List[ModuleType]:
     """Get the dependency list for the given imported module."""
-    flat = flatten(m.__name__)
+    flat = flatten(dependency, visited=[dependency])
 
-    fixed_flat = []
+    flat_used = []
 
-    for m in flat:
-        fixed = misc.get_module_from_full_name(m).__name__
-        if fixed:
-            fixed_flat.append(fixed)
+    for d in flat:
+        if dependency.is_used(d):
+            flat_used.append(d)
 
-    return fixed_flat
+    modules = [d.module_obj for d in flat_used]
+    return modules
 
 def _import(name, globals=None, locals=None, fromlist=None, level=_default_level):
     """__import__() replacement function that tracks module dependencies."""
@@ -86,8 +115,6 @@ def _import(name, globals=None, locals=None, fromlist=None, level=_default_level
         _parent = (globals["__package__"] + "." + name)
     else:
         _parent = name
-
-    add info about imported objects and stuff
 
     # Perform the actual import work using the base import function.
     base = _baseimport(name, globals, locals, fromlist, level)
@@ -111,7 +138,8 @@ def _import(name, globals=None, locals=None, fromlist=None, level=_default_level
         # If this is a nested import for a reloadable (source-based) module,
         # we append ourself to our parent's dependency list.
         if hasattr(m, '__file__'):
-            _dependencies[m.__name__].append(parent)
+            from_set = set(fromlist) if fromlist else set()
+            _dependencies[m.__name__].append(Dependency(parent, from_set))
 
     # Lastly, we always restore our global _parent pointer.
     _parent = parent
