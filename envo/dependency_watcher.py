@@ -68,9 +68,6 @@ def disable():
     """Disable global module dependency tracking."""
     global _blacklist, _parent
     builtins.__import__ = _baseimport
-    _blacklist = None
-    _dependencies.clear()
-    _parent = None
 
 def _reset():
     global _dependencies
@@ -81,14 +78,21 @@ def flatten(dependency: Dependency, visited: Optional[List[Dependency]] = None) 
     if not visited:
         visited = []
 
-    ret = _dependencies.get(dependency.actual_name, [])
+    deps = _dependencies.get(dependency.actual_name, [])
     for v in visited:
-        while v in ret: ret.remove(v)
+        while v in deps: deps.remove(v)
 
-    for mr in ret:
+    for mr in deps:
         visited.append(mr)
         flat = flatten(mr, visited.copy())
-        ret.extend(flat)
+        deps.extend(flat)
+
+    # remove duplicates
+    ret = []
+    for d in deps:
+        if d in ret:
+            continue
+        ret.append(d)
 
     return ret
 
@@ -139,7 +143,9 @@ def _import(name, globals=None, locals=None, fromlist=None, level=_default_level
         # we append ourself to our parent's dependency list.
         if hasattr(m, '__file__'):
             from_set = set(fromlist) if fromlist else set()
-            _dependencies[m.__name__].append(Dependency(parent, from_set))
+            dep = Dependency(parent, from_set)
+            if dep not in  _dependencies[m.__name__]:
+                _dependencies[m.__name__].append(dep)
 
     # Lastly, we always restore our global _parent pointer.
     _parent = parent

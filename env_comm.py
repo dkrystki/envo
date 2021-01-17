@@ -49,13 +49,7 @@ class EnvoCommEnv(UserEnv):  # type: ignore
 
     @command
     def fun(self) -> None:
-        run(
-            """
-            echo "reading"
-            read varname
-            echo $varname
-            """
-        )
+        1/0
 
     def fun2(self) -> None:
         print("test")

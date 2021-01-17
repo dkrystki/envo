@@ -91,6 +91,8 @@ class TestSourceReload(TestBase):
             """
             @on_partial_reload
             def _on_partial_reload(self, file: Path, actions):
+                assert [str(a) for a in actions] == ["Update: Variable: carwash.sprayers.number_of_sprayers"]
+                assert str(file).endswith("/sandbox/sample_project/carwash/sprayers.py")
                 print("Reloaded!")
                 self.redraw_prompt()
             """

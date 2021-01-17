@@ -11,6 +11,8 @@ from pygments.styles import get_style_by_name
 from rhei import Stopwatch
 from xonsh.pyghooks import XonshConsoleLexer
 
+from envo import console
+
 
 class Level(Enum):
     DEBUG = 0
@@ -254,6 +256,20 @@ class Logger:
         self, message: str, metadata: Optional[Dict[str, Any]] = None, print_msg=False
     ) -> None:
         self.log(message, Level.ERROR, metadata, print_msg)
+
+    def traceback(self) -> None:
+        from rich.traceback import Traceback
+
+        exc_type, exc_value, traceback = sys.exc_info()
+        trace = Traceback.extract(exc_type, exc_value, traceback)
+        trace.stacks[0].frames = trace.stacks[0].frames[-1:]
+        traceback_obj = Traceback(
+            trace=trace,
+            width=200,
+        )
+        from rich.text import Text
+
+        console.print(Text(""), traceback_obj)
 
     def get_msgs(self, filter: MsgFilter) -> List[Msg]:
         filtered: List[Msg] = []

@@ -4,6 +4,9 @@ import re
 import sys
 from collections import OrderedDict
 from copy import copy
+from subprocess import CalledProcessError
+from types import ModuleType
+
 from dataclasses import dataclass, field, is_dataclass
 from pathlib import Path
 from threading import Lock, Thread
@@ -30,7 +33,7 @@ from watchdog.events import FileModifiedEvent
 from envo import console, logger
 from envo.logging import Logger
 from envo.misc import Callback, EnvoError, FilesWatcher, import_from_file
-
+from importlib import reload
 __all__ = [
     "UserEnv",
     "BaseEnv",
@@ -102,7 +105,15 @@ class MagicFunction:
             args = (self.env, *args)  # type: ignore
         else:
             kwargs["self"] = self.env  # type: ignore
-        return self.func(*args, **kwargs)
+
+        try:
+            return self.func(*args, **kwargs)
+        except SystemExit as e:
+            logger.traceback()
+            self.env._li.shell.history.last_cmd_rtn = e.code
+        except BaseException as e:
+            logger.traceback()
+            self.env._li.shell.history.last_cmd_rtn = 1
 
     def render(self) -> str:
         kwargs_str = ", ".join([f"{k}={repr(v)}" for k, v in self.kwargs.items()])
@@ -148,7 +159,11 @@ class Command(MagicFunction):
         cwd = Path(".").absolute()
         os.chdir(str(self.env.root))
 
-        ret = self.func(self=self.env)
+        try:
+            ret = self.func(self=self.env)
+        except BaseException as e:
+            logger.traceback()
+            sys.exit(1)
 
         os.chdir(str(cwd))
         if ret is not None:
@@ -411,7 +426,7 @@ class SourceReloader:
             (
                 m
                 for m in reversed(list(sys.modules.values()))
-                if hasattr(m, "__file__") and m.__file__ == event.src_path
+                if hasattr(m, "__file__") and Path(m.__file__) == Path(event.src_path).resolve()
             ),
             None,
         )
@@ -419,7 +434,7 @@ class SourceReloader:
         if not module:
             return
 
-        reloader = PartialReloader(module, self.se.source.root)
+        reloader = PartialReloader(module, self.se.source.root, logger=self.li.logger)
         self.li.logger.info(f"Detected changes in {event.src_path}")
 
         try:
@@ -429,8 +444,7 @@ class SourceReloader:
         except SyntaxError as e:
             self.calls.on_reload_error(e)
         except BaseException as e:
-            self.full_reload()
-            self.calls.after_full_reload()
+            self.li.env.source_reload()
 
         self._watcher.flush()
 
@@ -759,6 +773,7 @@ class Env(EnvoEnv):
     _parents: List[Type["Env"]]
     _env_reloader: EnvReloader
     _source_reloaders: List[SourceReloader]
+    _sys_modules_snapshot: Dict[str, ModuleType] = OrderedDict()
 
     def __new__(cls, *args, **kwargs) -> "Env":
         env = BaseEnv.__new__(cls)
@@ -857,6 +872,9 @@ class Env(EnvoEnv):
                 )
                 self._source_reloaders.append(reloader)
 
+        if not self._sys_modules_snapshot:
+            self._sys_modules_snapshot = OrderedDict(sys.modules.copy())
+
     def _add_sources_to_syspath(self) -> None:
         for p in reversed(self.meta.sources):
             sys.path.insert(0, str(p.root))
@@ -895,18 +913,8 @@ class Env(EnvoEnv):
         self.logger.debug("Applied full reload")
 
     def _on_reload_error(self, error: Exception) -> None:
-        from rich.traceback import Traceback
+        logger.traceback()
 
-        exc_type, exc_value, traceback = sys.exc_info()
-        trace = Traceback.extract(exc_type, exc_value, traceback)
-        trace.stacks[0].frames = trace.stacks[0].frames[-1:]
-        traceback_obj = Traceback(
-            trace=trace,
-            width=200,
-        )
-        # self._li.shell.prompter.app.invalidate()
-        console.print("")
-        console.print(traceback_obj)
         self._li.shell.redraw()
         self._li.status.source_ready = True
 
@@ -1262,6 +1270,22 @@ class Env(EnvoEnv):
         from envo.stub_gen import StubGen
 
         StubGen(self).generate()
+
+    @command
+    def source_reload(self) -> None:
+        to_remove = list(sys.modules.keys() - self._sys_modules_snapshot.keys())
+
+        for n in reversed(to_remove):
+            m = sys.modules[n]
+            if not hasattr(m, "__file__"):
+                continue
+
+            sys.modules.pop(n)
+
+        for n in to_remove:
+            __import__(n)
+
+        self.logger.info(f"Full reload")
 
     def _run_boot_codes(self) -> None:
         self._li.status.source_ready = False

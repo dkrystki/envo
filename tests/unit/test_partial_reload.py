@@ -5,19 +5,23 @@ from textwrap import dedent
 from typing import Any, List
 
 import pytest
-from pytest import fixture
 
 from envo import dependency_watcher
 from envo.misc import import_from_file
 from envo.partial_reloader import PartialReloader
 from tests.unit import utils
 
+from envo import logger
 
-def assert_actions(reloader: PartialReloader, actions_names: List[str]) -> None:
+
+def assert_actions(reloader: PartialReloader, actions_names: List[str], ignore_order=False) -> None:
     actions_str = [
         repr(a) for a in reloader.applied_actions
     ]
-    assert actions_str == actions_names
+    if ignore_order:
+        assert sorted(actions_str) == sorted(actions_names)
+    else:
+        assert actions_str == actions_names
 
 
 def load_module(path: Path, root: Path) -> Any:
@@ -64,7 +68,7 @@ class TestFunctions(TestBase):
             module_file,
         )
 
-        reloader = PartialReloader(module, sandbox)
+        reloader = PartialReloader(module, sandbox, logger)
         reloader.run()
         assert_actions(
             reloader,
@@ -102,7 +106,7 @@ class TestFunctions(TestBase):
         """
         module_file.write_text(dedent(new_source))
 
-        reloader = PartialReloader(module, sandbox)
+        reloader = PartialReloader(module, sandbox, logger)
         reloader.run()
         assert_actions(
             reloader,
@@ -146,7 +150,7 @@ class TestFunctions(TestBase):
             )
         )
 
-        reloader = PartialReloader(module, sandbox)
+        reloader = PartialReloader(module, sandbox, logger)
         reloader.run()
         assert_actions(reloader, ["Delete: Function: module.fun2"])
 
@@ -179,7 +183,7 @@ class TestFunctions(TestBase):
             )
         )
 
-        reloader = PartialReloader(module, sandbox)
+        reloader = PartialReloader(module, sandbox, logger)
         reloader.run()
         assert_actions(
             reloader,
@@ -250,7 +254,7 @@ class TestGlobabVariable(TestBase):
                 sprinkler_n = 6
                 """))
 
-        reloader = PartialReloader(module.carwash, sandbox)
+        reloader = PartialReloader(module.carwash, sandbox, logger)
         reloader.run()
         assert_actions(reloader, ['Delete: Variable: carwash.money',
                                   'Update: Variable: carwash.sprinkler_n',
@@ -301,7 +305,7 @@ class TestGlobabVariable(TestBase):
                    sprinkler_n = 6
                    """))
 
-        reloader = PartialReloader(module.carwash, sandbox)
+        reloader = PartialReloader(module.carwash, sandbox, logger)
         reloader.run()
         assert_actions(reloader, ['Update: Variable: carwash.sprinkler_n',
  'Update: Module: car',
@@ -349,7 +353,7 @@ class TestGlobabVariable(TestBase):
                       sprinkler_n = 6
                       """))
 
-        reloader = PartialReloader(module.carwash, sandbox)
+        reloader = PartialReloader(module.carwash, sandbox, logger)
         reloader.run()
         assert_actions(reloader, ['Update: Variable: carwash.sprinkler_n',
  'Update: Module: container',
@@ -377,7 +381,7 @@ class TestGlobabVariable(TestBase):
         """
         module_file.write_text(dedent(new_source))
 
-        reloader = PartialReloader(module, sandbox)
+        reloader = PartialReloader(module, sandbox, logger)
         reloader.run()
         assert_actions(
             reloader,
@@ -430,7 +434,7 @@ class TestGlobabVariable(TestBase):
 
         utils.replace_in_code("sprinkler_n = 1", "sprinkler_n = 2", module_file)
 
-        reloader = PartialReloader(module, sandbox)
+        reloader = PartialReloader(module, sandbox, logger)
         reloader.run()
         assert_actions(
             reloader,
@@ -471,7 +475,7 @@ class TestGlobabVariable(TestBase):
 
         utils.replace_in_code("sprinkler_n = 1", "", module_file)
 
-        reloader = PartialReloader(module, sandbox)
+        reloader = PartialReloader(module, sandbox, logger)
         reloader.run()
         assert_actions(
             reloader,
@@ -527,7 +531,7 @@ class TestClasses(TestBase):
                 sprinkler_n = 6
             """))
 
-        reloader = PartialReloader(carwash_module, sandbox)
+        reloader = PartialReloader(carwash_module, sandbox, logger)
         reloader.run()
         assert_actions(reloader, ['Update: ClassAttribute: carwash1.Carwash.sprinkler_n',
                                   'Update: Module: car1',
@@ -582,7 +586,7 @@ class TestClasses(TestBase):
             )
         )
 
-        reloader = PartialReloader(module, sandbox)
+        reloader = PartialReloader(module, sandbox, logger)
         reloader.run()
         assert_actions(
             reloader,
@@ -595,6 +599,45 @@ class TestClasses(TestBase):
         assert module.CarwashBase.sprinklers_n == 55
         assert module.Carwash.sprinklers_n == 77
         assert print_sprinklers_id == id(module.CarwashBase.print_sprinklers)
+
+    def test_added_class(self, sandbox):
+        module_file = sandbox / "module.py"
+        module_file.touch()
+        module_file.write_text(
+            dedent(
+        """
+        a = 1
+        """
+            )
+        )
+
+        module = load_module(module_file, sandbox)
+
+        module_file.write_text(
+            dedent(
+                """
+                a = 1
+                
+                class Carwash:
+                    sprinklers_n: int = 55
+    
+                    def print_sprinklers(self) -> str:
+                        return 20
+                """
+            )
+        )
+
+        reloader = PartialReloader(module, sandbox, logger)
+        reloader.run()
+        assert_actions(
+            reloader,
+            ['Add: ClassAttribute: module.Carwash.sprinklers_n',
+             'Add: Class: module.Carwash',
+             'Add: Function: module.Carwash.print_sprinklers'], ignore_order=True
+        )
+
+        assert module.Carwash.sprinklers_n == 55
+        assert module.Carwash().print_sprinklers() == 20
 
     def test_recursion(self, sandbox):
         module_file = sandbox / "module.py"
@@ -613,7 +656,7 @@ class TestClasses(TestBase):
 
         module = load_module(module_file, sandbox)
 
-        reloader = PartialReloader(module, sandbox)
+        reloader = PartialReloader(module, sandbox, logger)
         assert list(reloader.old_module.flat.keys()) == ['module', 'module.Carwash.class_attr', 'module.Carwash']
 
     def test_recursion_two_deep(self, sandbox):
@@ -636,7 +679,7 @@ class TestClasses(TestBase):
 
         module = load_module(module_file, sandbox)
 
-        reloader = PartialReloader(module, sandbox)
+        reloader = PartialReloader(module, sandbox, logger)
         assert list(reloader.old_module.flat.keys()) == ['module', 'module.Carwash.class_attr',
                                                          'module.Carwash.Car.class_attr2', 'module.Carwash.Car',
                                                          'module.Carwash']
@@ -675,7 +718,7 @@ class TestClasses(TestBase):
             )
         )
 
-        reloader = PartialReloader(module, sandbox)
+        reloader = PartialReloader(module, sandbox, logger)
         reloader.run()
         assert_actions(
             reloader,
@@ -721,7 +764,7 @@ class TestClasses(TestBase):
             )
         )
 
-        reloader = PartialReloader(module, sandbox)
+        reloader = PartialReloader(module, sandbox, logger)
         reloader.run()
         assert_actions(
             reloader,
@@ -772,7 +815,7 @@ class TestClasses(TestBase):
             )
         )
 
-        reloader = PartialReloader(module, sandbox)
+        reloader = PartialReloader(module, sandbox, logger)
         reloader.run()
         assert_actions(
             reloader,
@@ -811,7 +854,7 @@ class TestClasses(TestBase):
             )
         )
 
-        reloader = PartialReloader(module, sandbox)
+        reloader = PartialReloader(module, sandbox, logger)
         reloader.run()
         assert_actions(reloader, ["Add: Function: module.Carwash.print_sprinklers"])
 
@@ -849,7 +892,7 @@ class TestClasses(TestBase):
             )
         )
 
-        reloader = PartialReloader(module, sandbox)
+        reloader = PartialReloader(module, sandbox, logger)
         reloader.run()
         assert_actions(reloader, ["Delete: Function: module.Carwash.fun2"])
 
@@ -888,7 +931,7 @@ class TestModules(TestBase):
 
         utils.replace_in_code("global_var = 2", "global_var = 5", master_module_file)
 
-        reloader = PartialReloader(module, sandbox)
+        reloader = PartialReloader(module, sandbox, logger)
         reloader.run()
         assert_actions(
             reloader,
@@ -923,7 +966,7 @@ class TestModules(TestBase):
             )
         )
 
-        reloader = PartialReloader(module, sandbox)
+        reloader = PartialReloader(module, sandbox, logger)
         reloader.run()
         assert_actions(
             reloader, ["Add: Import: module.math"]
@@ -932,6 +975,10 @@ class TestModules(TestBase):
         assert hasattr(module, "math")
 
     def test_removed_import(self, sandbox):
+        """
+        We don't wanna remove imports because how python handles nested imports.
+        """
+
         module_file = sandbox / "module.py"
         module_file.touch()
         module_file.write_text(
@@ -955,14 +1002,14 @@ class TestModules(TestBase):
             )
         )
 
-        reloader = PartialReloader(module, sandbox)
+        reloader = PartialReloader(module, sandbox, logger)
         reloader.run()
         assert_actions(
             reloader,
-            ["Delete: Import: module.math"],
+            [],
         )
 
-        assert not hasattr(module, "math")
+        assert hasattr(module, "math")
 
     def test_add_relative(self, sandbox):
         init_file = Path("__init__.py")
@@ -993,7 +1040,7 @@ class TestModules(TestBase):
         """
         master_module_file.write_text(dedent(source))
 
-        reloader = PartialReloader(module, sandbox)
+        reloader = PartialReloader(module, sandbox, logger)
         reloader.run()
         assert_actions(
             reloader,
@@ -1025,7 +1072,7 @@ class TestMisc(TestBase):
             )
         )
 
-        reloader = PartialReloader(module, sandbox)
+        reloader = PartialReloader(module, sandbox, logger)
 
         with pytest.raises(SyntaxError):
             reloader.run()
@@ -1051,6 +1098,6 @@ class TestMisc(TestBase):
             )
         )
 
-        reloader = PartialReloader(module, sandbox)
+        reloader = PartialReloader(module, sandbox, logger)
         with pytest.raises(ZeroDivisionError):
             reloader.run()

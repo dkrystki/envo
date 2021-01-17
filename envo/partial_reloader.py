@@ -11,8 +11,8 @@ from typing import Any, Dict, List, Optional, Type, Set
 
 from envo import dependency_watcher
 from envo.dependency_watcher import Dependency
-from envo.misc import import_from_file
-
+from envo import misc
+from collections import OrderedDict
 
 dataclass = dataclass(repr=False)
 
@@ -94,6 +94,10 @@ class Object:
         return {self.full_name: self}
 
     def _is_ignored(self, name: str) -> bool:
+        name = str(name)
+        if name.startswith("__") and name.endswith("__") and "hash" in name:
+            return True
+
         return name in [
             "__module__",
             "__file__",
@@ -330,6 +334,18 @@ class Class(ContainerObj):
         ret = self.python_obj.__dict__
         return ret
 
+    class Add(FinalObj.Add):
+        def execute(self) -> None:
+            super().execute()
+            setattr(self.parent.python_obj, self.object.name, self.object.python_obj)
+
+    @classmethod
+    def get_actions_for_add(
+        cls, reloader: "PartialReloader", parent: "ContainerObj", obj: "Object"
+    ) -> List["Action"]:
+        return [cls.Add(reloader=reloader, parent=parent, object=obj)]
+
+
 
 @dataclass
 class Dictionary(ContainerObj):
@@ -438,6 +454,9 @@ class DictionaryItem(FinalObj):
     def get_actions_for_update(
         self, new_object: "Variable"
     ) -> List["Action"]:
+        if self.python_obj == new_object.python_obj:
+            return []
+
         return [
             self.Update(
                 reloader=self.reloader,
@@ -473,6 +492,11 @@ class Import(FinalObj):
     ) -> List["Action"]:
         return [cls.Add(reloader=reloader, parent=parent, object=obj)]
 
+    def get_actions_for_delete(
+        self, reloader: "PartialReloader", parent: "ContainerObj", obj: "Object"
+    ) -> List["Action"]:
+        return []
+
 
 @dataclass
 class Module(ContainerObj):
@@ -482,7 +506,7 @@ class Module(ContainerObj):
 
         def execute(self) -> None:
             super().execute()
-            reloader = PartialReloader(self.module.python_obj, self.reloader.root)
+            reloader = PartialReloader(self.module.python_obj, self.reloader.root, self.reloader.logger)
             reloader.run()
             self.reloader.applied_actions.extend(reloader.applied_actions)
 
@@ -542,7 +566,7 @@ class Module(ContainerObj):
         new_objects_names = b.keys() - a.keys()
         new_objects = {n: b[n] for n in new_objects_names}
         for o in new_objects.values():
-            parent = a[o.parent.full_name]
+            parent = a.get(o.parent.full_name, b[o.parent.full_name])
             ret.extend(
                 o.get_actions_for_add(reloader=self.reloader, parent=parent, obj=o)
             )
@@ -574,10 +598,12 @@ class Module(ContainerObj):
 class PartialReloader:
     module_obj: Any
     applied_actions: List[Action]
+    logger: Any
 
-    def __init__(self, module_obj: Any, root: Path) -> None:
-        self.root = root
+    def __init__(self, module_obj: Any, root: Path, logger: Any) -> None:
+        self.root = root.resolve()
         self.module_obj = module_obj
+        self.logger = logger
         self.applied_actions = []
 
     def _is_user_module(self, module: Any):
@@ -603,27 +629,28 @@ class PartialReloader:
 
     @property
     def new_module(self) -> Module:
+        dependency_watcher.disable()
+        module_obj = misc.import_from_file(Path(self.module_obj.__file__), self.root)
+        dependency_watcher.enable()
+
         return Module(
-            import_from_file(Path(self.module_obj.__file__), self.root),
+            module_obj,
             reloader=self,
             name=f"{self.module_obj.__name__}",
         )
-
-    def get_actions(self) -> List[Action]:
-        old_module = self.old_module
-        new_module = self.new_module
-
-        ret = old_module.get_actions(new_module)
-        return ret
-
-    def apply_actions(self, actions: List[Action]) -> None:
-        for a in actions:
-            a.execute()
 
     def run(self) -> List[Action]:
         """
         :return: True if succeded False i unable to reload
         """
-        actions = self.get_actions()
-        self.apply_actions(actions)
-        return actions
+        self.applied_actions = []
+
+        old_module = self.old_module
+        new_module = self.new_module
+
+        actions = old_module.get_actions(new_module)
+
+        for a in actions:
+            a.execute()
+
+        return self.applied_actions
