@@ -70,16 +70,17 @@ class Object:
     ) -> List["Action"]:
         raise NotImplementedError()
 
-    @classmethod
     def get_actions_for_add(
-        cls, reloader: "PartialReloader", parent: "Object", obj: "Object"
+        self, reloader: "PartialReloader", parent: "Object", obj: "Object"
     ) -> List["Action"]:
         raise NotImplementedError()
 
     def get_actions_for_delete(
         self, reloader: "PartialReloader", parent: "ContainerObj", obj: "Object"
     ) -> List["Action"]:
-        return [self.Delete(reloader=reloader, parent=parent, object=obj)]
+        ret = [self.Delete(reloader=reloader, parent=parent, object=obj)]
+        ret.extend(self.get_actions_for_dependent_modules(self))
+        return ret
 
     @property
     def full_name(self) -> str:
@@ -133,6 +134,14 @@ class Object:
         ret = [o.python_obj for o in self.get_parents_flat()]
         return ret
 
+    def get_actions_for_dependent_modules(self, object_of_interest: "Object") -> List[Action]:
+        ret = []
+        for m in self.module.get_dependent_modules([object_of_interest]):
+            module = Module(m, reloader=self.reloader)
+            ret.extend(module.get_actions_for_update())
+
+        return ret
+
     def __eq__(self, other: "Object") -> bool:
         return self.python_obj == other.python_obj
 
@@ -182,11 +191,10 @@ class Function(FinalObj):
         else:
             return []
 
-    @classmethod
     def get_actions_for_add(
-        cls, reloader: "PartialReloader", parent: "ContainerObj", obj: "Object"
+        self, reloader: "PartialReloader", parent: "ContainerObj", obj: "Object"
     ) -> List["Action"]:
-        return [cls.Add(reloader=reloader, parent=parent, object=obj)]
+        return [self.Add(reloader=reloader, parent=parent, object=obj)]
 
     def __eq__(self, other: "Function") -> bool:
         if self.python_obj.__class__ is not other.python_obj.__class__:
@@ -252,6 +260,19 @@ class Method(Function):
 
 
 @dataclass
+class PropertyGetter(Function):
+    @classmethod
+    def get_func(cls, obj: Any) -> Any:
+        return obj.fget
+
+
+class PropertySetter(Function):
+    @classmethod
+    def get_func(cls, obj: Any) -> Any:
+        return obj.fset
+
+
+@dataclass
 class ContainerObj(Object):
     children: Dict[str, "Object"] = field(init=False, default_factory=dict)
 
@@ -281,6 +302,15 @@ class ContainerObj(Object):
                 obj_class = Function
             elif inspect.isclass(o):
                 obj_class = Class
+            elif isinstance(o, property):
+                obj_class = PropertyGetter
+
+                if o.fset:
+                    name = n + "__setter__"
+                    self.children[name] = PropertySetter(
+                        o, parent=self, name=name, reloader=self.reloader, module=self.module
+                    )
+
             elif isinstance(o, dict):
                 obj_class = Dictionary
             elif inspect.ismodule(o):
@@ -339,12 +369,18 @@ class Class(ContainerObj):
             super().execute()
             setattr(self.parent.python_obj, self.object.name, self.object.python_obj)
 
-    @classmethod
     def get_actions_for_add(
-        cls, reloader: "PartialReloader", parent: "ContainerObj", obj: "Object"
+        self, reloader: "PartialReloader", parent: "ContainerObj", obj: "Object"
     ) -> List["Action"]:
-        return [cls.Add(reloader=reloader, parent=parent, object=obj)]
+        ret = [self.Add(reloader=reloader, parent=parent, object=obj)]
+        ret.extend(self.get_actions_for_dependent_modules(self))
+        return ret
 
+    def get_actions_for_delete(
+        self, reloader: "PartialReloader", parent: "ContainerObj", obj: "Object"
+    ) -> List["Action"]:
+        ret = super().get_actions_for_delete(reloader, parent, obj)
+        return ret
 
 
 @dataclass
@@ -394,17 +430,15 @@ class Variable(FinalObj):
             )
         ]
 
-        for m in self.module.get_dependent_modules([self]):
-            module = Module(m, reloader=self.reloader)
-            ret.extend(module.get_actions_for_update())
-
+        ret.extend(self.get_actions_for_dependent_modules(self))
         return ret
 
-    @classmethod
     def get_actions_for_add(
-        cls, reloader: "PartialReloader", parent: "ContainerObj", obj: "Object"
+        self, reloader: "PartialReloader", parent: "ContainerObj", obj: "Object"
     ) -> List["Action"]:
-        return [cls.Add(reloader=reloader, parent=parent, object=obj)]
+        ret = [self.Add(reloader=reloader, parent=parent, object=obj)]
+        ret.extend(self.get_actions_for_dependent_modules(self))
+        return ret
 
 
 @dataclass
@@ -424,17 +458,16 @@ class ClassAttribute(Variable):
             )
         ]
 
-        for m in self.module.get_dependent_modules([self.parent]):
-            module = Module(m, reloader=self.reloader)
-            ret.extend(module.get_actions_for_update())
+        ret.extend(self.get_actions_for_dependent_modules(self.parent))
 
         return ret
 
-    @classmethod
     def get_actions_for_add(
-        cls, reloader: "PartialReloader", parent: "ContainerObj", obj: "Object"
+        self, reloader: "PartialReloader", parent: "ContainerObj", obj: "Object"
     ) -> List["Action"]:
-        return [cls.Add(reloader=reloader, parent=parent, object=obj)]
+        ret = [self.Add(reloader=reloader, parent=parent, object=obj)]
+        # ret.extend(self.get_actions_for_dependent_modules(self.parent))
+        return ret
 
 
 @dataclass
@@ -457,7 +490,7 @@ class DictionaryItem(FinalObj):
         if self.python_obj == new_object.python_obj:
             return []
 
-        return [
+        ret = [
             self.Update(
                 reloader=self.reloader,
                 parent=self.parent,
@@ -466,11 +499,13 @@ class DictionaryItem(FinalObj):
             )
         ]
 
-    @classmethod
+        ret.extend(self.get_actions_for_dependent_modules(self.parent))
+        return ret
+
     def get_actions_for_add(
-        cls, reloader: "PartialReloader", parent: "ContainerObj", obj: "Object"
+        self, reloader: "PartialReloader", parent: "ContainerObj", obj: "Object"
     ) -> List["Action"]:
-        return [cls.Add(reloader=reloader, parent=parent, object=obj)]
+        return [self.Add(reloader=reloader, parent=parent, object=obj)]
 
 
 @dataclass
@@ -486,11 +521,12 @@ class Import(FinalObj):
     ) -> List["Action"]:
         return []
 
-    @classmethod
     def get_actions_for_add(
-        cls, reloader: "PartialReloader", parent: "ContainerObj", obj: "Object"
+        self, reloader: "PartialReloader", parent: "ContainerObj", obj: "Object"
     ) -> List["Action"]:
-        return [cls.Add(reloader=reloader, parent=parent, object=obj)]
+        ret = [self.Add(reloader=reloader, parent=parent, object=obj)]
+        ret.extend(self.get_actions_for_dependent_modules(self))
+        return ret
 
     def get_actions_for_delete(
         self, reloader: "PartialReloader", parent: "ContainerObj", obj: "Object"

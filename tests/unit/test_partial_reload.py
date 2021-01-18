@@ -234,7 +234,7 @@ class TestGlobabVariable(TestBase):
         client_module.write_text(dedent("""
                 import carwash
 
-                car_sprinklers = carwash.sprinkler_n / 3
+                client_car_sprinklers = carwash.sprinkler_n / 3
                 """))
 
         boss_module = sandbox / "boss.py"
@@ -252,12 +252,12 @@ class TestGlobabVariable(TestBase):
 
         carwash_file_module.write_text(dedent("""
                 sprinkler_n = 6
+                money = 1e3
                 """))
 
         reloader = PartialReloader(module.carwash, sandbox, logger)
         reloader.run()
-        assert_actions(reloader, ['Delete: Variable: carwash.money',
-                                  'Update: Variable: carwash.sprinkler_n',
+        assert_actions(reloader, ['Update: Variable: carwash.sprinkler_n',
                                   'Update: Module: car',
                                   'Update: Variable: car.sprinkler_n',
                                   'Update: Variable: car.car_sprinklers',
@@ -265,14 +265,14 @@ class TestGlobabVariable(TestBase):
                                   'Update: Variable: accounting.car_sprinklers',
                                   'Update: Variable: accounting.sprinklers_from_accounting',
                                   'Update: Module: client',
-                                  'Update: Variable: client.car_sprinklers'])
+                                  'Update: Variable: client.client_car_sprinklers'])
 
         assert module.carwash.sprinkler_n == 6
         assert module.car.sprinkler_n == 6
         assert module.car.car_sprinklers == 2
         assert module.accounting.car_sprinklers == 2
         assert module.accounting.sprinklers_from_accounting == 20
-        assert module.client.car_sprinklers == 2
+        assert module.client.client_car_sprinklers == 2
 
     def test_modified_import_star(self, sandbox):
         init_file = Path("__init__.py")
@@ -308,9 +308,9 @@ class TestGlobabVariable(TestBase):
         reloader = PartialReloader(module.carwash, sandbox, logger)
         reloader.run()
         assert_actions(reloader, ['Update: Variable: carwash.sprinkler_n',
- 'Update: Module: car',
- 'Update: Variable: car.sprinkler_n',
- 'Update: Variable: car.car_sprinklers'])
+                                  'Update: Module: car',
+                                  'Update: Variable: car.sprinkler_n',
+                                  'Update: Variable: car.car_sprinklers'])
 
         assert module.carwash.sprinkler_n == 6
         assert module.car.car_sprinklers == 2
@@ -356,12 +356,12 @@ class TestGlobabVariable(TestBase):
         reloader = PartialReloader(module.carwash, sandbox, logger)
         reloader.run()
         assert_actions(reloader, ['Update: Variable: carwash.sprinkler_n',
- 'Update: Module: container',
- 'Update: Variable: container.sprinkler_n',
- 'Update: Module: car',
- 'Update: Variable: car.sprinkler_n',
- 'Update: Variable: car.car_sprinklers',
- 'Update: Module: car'])
+                                  'Update: Module: container',
+                                  'Update: Variable: container.sprinkler_n',
+                                  'Update: Module: car',
+                                  'Update: Variable: car.sprinkler_n',
+                                  'Update: Variable: car.car_sprinklers',
+                                  'Update: Module: car'])
 
         assert module.carwash.sprinkler_n == 6
         assert module.car.car_sprinklers == 2
@@ -605,9 +605,9 @@ class TestClasses(TestBase):
         module_file.touch()
         module_file.write_text(
             dedent(
-        """
-        a = 1
-        """
+                """
+                a = 1
+                """
             )
         )
 
@@ -829,6 +829,98 @@ class TestClasses(TestBase):
         assert reffered_print_sprinklers_cls() == "There are 5 sprinklers (Cls)."
         assert module.Carwash().print_sprinklers() == "There are 5 sprinklers."
         assert print_sprinklers_id == id(module.Carwash.print_sprinklers)
+
+    def test_modified_property(self, sandbox):
+        module_file = sandbox / "module.py"
+        module_file.touch()
+        module_file.write_text(
+            dedent(
+                """
+            class Carwash:
+                @property
+                def sprinklers_n(self) -> str:
+                    return 3
+                
+                @property
+                def cars_n(self) -> str:
+                    return 5
+            """
+            )
+        )
+
+        module = load_module(module_file, sandbox)
+        assert module.Carwash().sprinklers_n == 3
+        assert module.Carwash().cars_n == 5
+
+        module_file.write_text(
+            dedent(
+                """
+            class Carwash:
+                @property
+                def sprinklers_n(self) -> str:
+                    return 10
+
+                @property
+                def cars_n(self) -> str:
+                    return 5
+            """
+            )
+        )
+
+        reloader = PartialReloader(module, sandbox, logger)
+        reloader.run()
+        assert_actions(
+            reloader,
+            ['Update: PropertyGetter: module.Carwash.sprinklers_n'],
+        )
+
+        assert module.Carwash().sprinklers_n == 10
+        assert module.Carwash().cars_n == 5
+
+    def test_modified_property_setter(self, sandbox):
+        module_file = sandbox / "module.py"
+        module_file.touch()
+        module_file.write_text(
+            dedent(
+                """
+            class Carwash:
+                @property
+                def sprinklers_n(self) -> str:
+                    return 10
+
+                @sprinklers_n.setter
+                def sprinklers_n(self, x) -> str:
+                    self.a = x
+            """
+            )
+        )
+
+        module = load_module(module_file, sandbox)
+        assert module.Carwash().sprinklers_n == 10
+
+        module_file.write_text(
+            dedent(
+                """
+            class Carwash:
+                @property
+                def sprinklers_n(self) -> str:
+                    return 10
+
+                @sprinklers_n.setter
+                def sprinklers_n(self, x) -> str:
+                    self.a = x + 1
+            """
+            )
+        )
+
+        reloader = PartialReloader(module, sandbox, logger)
+        reloader.run()
+        assert_actions(
+            reloader,
+            ['Update: PropertySetter: module.Carwash.sprinklers_n__setter__'],
+        )
+
+        assert module.Carwash().sprinklers_n == 10
 
     def test_added_method(self, sandbox):
         module_file = sandbox / "module.py"

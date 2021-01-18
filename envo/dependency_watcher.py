@@ -14,6 +14,7 @@ from collections import defaultdict
 from typing import List, Optional, Any, Dict, Set
 
 import sys
+import inspect
 
 
 __all__ = ('enable', 'disable', 'get_dependencies')
@@ -21,7 +22,6 @@ __all__ = ('enable', 'disable', 'get_dependencies')
 _baseimport = builtins.__import__
 _blacklist = None
 _dependencies = defaultdict(list)
-_parent = None
 
 # PEP 328 changed the default level to 0 in Python 3.3.
 _default_level = -1 if sys.version_info < (3, 3) else 0
@@ -106,21 +106,29 @@ def get_dependencies(dependency: Dependency) -> List[ModuleType]:
         if dependency.is_used(d):
             flat_used.append(d)
 
-    modules = [d.module_obj for d in flat_used]
+    modules = []
+    for d in flat_used:
+        if d.module_obj in modules:
+            continue
+        modules.append(d.module_obj)
     return modules
+
+def get_this_frame_n() -> int:
+    ret = 0
+
+    while True:
+        if sys._getframe(ret).f_globals["__name__"] == "envo.dependency_watcher":
+            return ret
+        ret += 1
 
 def _import(name, globals=None, locals=None, fromlist=None, level=_default_level):
     """__import__() replacement function that tracks module dependencies."""
     # Track our current parent module.  This is used to find our current place
     # in the dependency graph.
-    global _parent
-    parent = _parent
-    if globals and "__package__" in globals and globals["__package__"]:
-        _parent = (globals["__package__"] + "." + name)
-    else:
-        _parent = name
 
     # Perform the actual import work using the base import function.
+    this_frame_n = get_this_frame_n()
+    parent = sys._getframe(this_frame_n+1).f_globals
     base = _baseimport(name, globals, locals, fromlist, level)
 
     if base is not None and parent is not None:
@@ -137,17 +145,15 @@ def _import(name, globals=None, locals=None, fromlist=None, level=_default_level
                 try:
                     m = getattr(m, component)
                 except AttributeError:
+                    if not hasattr(m, "__name__"):
+                        continue
                     m = sys.modules[m.__name__ + '.' + component]
 
         # If this is a nested import for a reloadable (source-based) module,
         # we append ourself to our parent's dependency list.
         if hasattr(m, '__file__'):
             from_set = set(fromlist) if fromlist else set()
-            dep = Dependency(parent, from_set)
-            if dep not in  _dependencies[m.__name__]:
-                _dependencies[m.__name__].append(dep)
-
-    # Lastly, we always restore our global _parent pointer.
-    _parent = parent
+            dep = Dependency(parent["__name__"], from_set)
+            _dependencies[m.__name__].append(dep)
 
     return base

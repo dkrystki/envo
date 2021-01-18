@@ -33,6 +33,8 @@ from watchdog.events import FileModifiedEvent
 from envo import console, logger
 from envo.logging import Logger
 from envo.misc import Callback, EnvoError, FilesWatcher, import_from_file
+from envo import misc
+
 from importlib import reload
 __all__ = [
     "UserEnv",
@@ -422,14 +424,12 @@ class SourceReloader:
         )
 
     def _on_source_edit(self, event: FileModifiedEvent) -> None:
-        module = next(
-            (
-                m
-                for m in reversed(list(sys.modules.values()))
-                if hasattr(m, "__file__") and Path(m.__file__) == Path(event.src_path).resolve()
-            ),
-            None,
-        )
+        module_full_name = misc.path_to_module_name(Path(event.src_path), self.se.source.root)
+        module_name = misc.get_module_from_full_name(module_full_name)
+        if not module_name:
+            return
+
+        module = sys.modules.get(module_name, None)
 
         if not module:
             return
