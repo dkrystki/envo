@@ -30,7 +30,7 @@ _default_level = -1 if sys.version_info < (3, 3) else 0
 @dataclass
 class Dependency:
     name: str
-    used_objs: Set[str]
+    used_obj: List[str]
 
     @property
     def actual_name(self):
@@ -40,14 +40,17 @@ class Dependency:
     def module_obj(self) -> ModuleType:
         return sys.modules[self.actual_name]
 
-    def is_used(self, dependency: "Dependency") -> bool:
-        if dependency.used_objs:
-            if "*" in dependency.used_objs:
+    def is_used(self, obj_name: str) -> bool:
+        obj_parts = obj_name.split(".")
+
+        if self.used_obj:
+            if "*" in self.used_obj:
                 return True
-            return bool(self.used_objs & dependency.used_objs)
-        else:
-            source = Path(dependency.module_obj.__file__).read_text()
-            return any(f"{self.actual_name}.{o}" in source for o in list(self.used_objs))
+
+            if not set(self.used_obj) & set(obj_parts):
+                return False
+
+        return obj_parts[-1] in Path(self.module_obj.__file__).read_text()
 
 
 def enable(blacklist=None) -> None:
@@ -74,17 +77,20 @@ def _reset():
     _dependencies = defaultdict(list)
 
 
-def flatten(dependency: Dependency, visited: Optional[List[Dependency]] = None) -> List[Dependency]:
+def flatten(module_full_name: str, used_obj: str, visited: Optional[List[str]] = None) -> List[Dependency]:
     if not visited:
         visited = []
 
-    deps = _dependencies.get(dependency.actual_name, [])
-    for v in visited:
-        while v in deps: deps.remove(v)
+    deps = _dependencies.get(module_full_name, [])
 
-    for mr in deps:
-        visited.append(mr)
-        flat = flatten(mr, visited.copy())
+    for v in visited:
+        deps = [d for d in deps if d.name != v]
+
+    deps = [d for d in deps if d.is_used(used_obj)]
+
+    for d in deps:
+        visited.append(d.name)
+        flat = flatten(d.name, used_obj, visited.copy())
         deps.extend(flat)
 
     # remove duplicates
@@ -96,18 +102,12 @@ def flatten(dependency: Dependency, visited: Optional[List[Dependency]] = None) 
 
     return ret
 
-def get_dependencies(dependency: Dependency) -> List[ModuleType]:
+def get_dependencies(module_full_name: str, used_obj: str) -> List[ModuleType]:
     """Get the dependency list for the given imported module."""
-    flat = flatten(dependency, visited=[dependency])
-
-    flat_used = []
-
-    for d in flat:
-        if dependency.is_used(d):
-            flat_used.append(d)
+    flat = flatten(module_full_name, used_obj, visited=[module_full_name])
 
     modules = []
-    for d in flat_used:
+    for d in flat:
         if d.module_obj in modules:
             continue
         modules.append(d.module_obj)
@@ -152,8 +152,7 @@ def _import(name, globals=None, locals=None, fromlist=None, level=_default_level
         # If this is a nested import for a reloadable (source-based) module,
         # we append ourself to our parent's dependency list.
         if hasattr(m, '__file__'):
-            from_set = set(fromlist) if fromlist else set()
-            dep = Dependency(parent["__name__"], from_set)
+            dep = Dependency(parent["__name__"], fromlist)
             _dependencies[m.__name__].append(dep)
 
     return base

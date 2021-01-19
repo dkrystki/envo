@@ -386,6 +386,9 @@ class Source:
     watch_files: List[str] = field(default_factory=list)
     ignore_files: List[str] = field(default_factory=list)
 
+    def __post_init__(self) -> None:
+        self.root = self.root.resolve()
+
 
 class SourceReloader:
     @dataclass
@@ -424,7 +427,7 @@ class SourceReloader:
         )
 
     def _on_source_edit(self, event: FileModifiedEvent) -> None:
-        module_full_name = misc.path_to_module_name(Path(event.src_path), self.se.source.root)
+        module_full_name = misc.path_to_module_name(event.src_path, self.se.source.root)
         module_name = misc.get_module_from_full_name(module_full_name)
         if not module_name:
             return
@@ -439,12 +442,11 @@ class SourceReloader:
 
         try:
             self.calls.on_reload_start()
-            actions = reloader.run()
-            self.calls.after_partial_reload(Path(event.src_path), actions)
-        except SyntaxError as e:
-            self.calls.on_reload_error(e)
+            reloader.run()
+            self.calls.after_partial_reload(event.src_path, reloader.applied_actions)
         except BaseException as e:
-            self.li.env.source_reload()
+            self.calls.after_partial_reload(event.src_path, reloader.applied_actions)
+            self.calls.on_reload_error(e)
 
         self._watcher.flush()
 

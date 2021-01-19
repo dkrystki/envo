@@ -193,6 +193,62 @@ class TestFunctions(TestBase):
         assert not hasattr(module, "fun1")
         assert hasattr(module, "fun_renamed")
 
+    def test_uses_class(self, sandbox):
+        module_file = sandbox / "module.py"
+        module_file.touch()
+        module_file.write_text(
+            dedent(
+            """
+            class Car:
+                engine_power = 1
+                colour: str
+                
+                def __init__(self, colour: str):
+                    self.colour = colour
+                    
+            def fun():
+                car = Car("red")
+                return car 
+            """
+            )
+        )
+
+        module = load_module(module_file, sandbox)
+        car_class_id = id(module.Car)
+        fun_id = id(module.fun)
+
+        module_file.write_text(
+            dedent(
+            """
+            class Car:
+                engine_power = 1
+                colour: str
+                
+                def __init__(self, colour: str):
+                    self.colour = colour
+                    
+            def fun():
+                car = Car("green")
+                return car
+            """
+            )
+        )
+
+        reloader = PartialReloader(module, sandbox, logger)
+        reloader.run()
+        assert_actions(
+            reloader,
+            ['Update: Function: module.fun']
+        )
+
+        assert id(module.Car) == car_class_id
+        assert id(module.fun) == fun_id
+
+        assert isinstance(module.fun(), module.Car)
+        assert isinstance(module.fun(), module.Car)
+
+        assert module.fun().colour == "green"
+
 
 class TestGlobabVariable(TestBase):
     def test_modified_global_var_with_dependencies(self, sandbox):
@@ -830,6 +886,81 @@ class TestClasses(TestBase):
         assert module.Carwash().print_sprinklers() == "There are 5 sprinklers."
         assert print_sprinklers_id == id(module.Carwash.print_sprinklers)
 
+    def test_uses_other_classes(self, sandbox):
+        module_file = sandbox / "module.py"
+        module_file.touch()
+        module_file.write_text(
+            dedent(
+            """
+            class Engine:
+                brand: str
+                
+                def __init__(self, brand: str = "Tesla"):
+                    self.brand = brand
+
+            class Car:
+                colour: str
+                engine = Engine()
+                engine_class = None
+
+                def __init__(self, colour: str) -> str:
+                    self.colour = colour
+            
+            class Carwash:
+                car_a = Car("red")
+                car_b = Car("blue")
+
+                def __init__(self) -> str:
+                    self.car_c = Car("green")
+            """
+            )
+        )
+
+        module = load_module(module_file, sandbox)
+
+        # First edit
+        module_file.write_text(
+            dedent(
+                """
+                class Engine:
+                    brand: str
+                    
+                    def __init__(self, brand: str = "Tesla"):
+                        self.brand = brand
+
+                class Car:
+                    colour: str
+                    engine = Engine("BMW")
+                    engine_class = Engine
+
+                    def __init__(self, colour: str) -> str:
+                        self.colour = colour
+
+                class Carwash:
+                    car_a = Car("yellow")
+                    car_b = Car("blue")
+
+                    def __init__(self) -> str:
+                        self.car_c = Car("black")
+                """
+            )
+        )
+
+        reloader = PartialReloader(module, sandbox, logger)
+        reloader.run()
+        assert_actions(
+            reloader,
+            ['Update: ClassAttribute: module.Car.engine',
+             'Update: ClassAttribute: module.Carwash.car_a',
+             'Update: Function: module.Carwash.__init__']
+        )
+
+        assert isinstance(module.Carwash().car_b, module.Car)
+        assert isinstance(module.Carwash().car_c, module.Car)
+        assert isinstance(module.Carwash().car_a, module.Car)
+        assert isinstance(module.Carwash().car_a.engine, module.Engine)
+        assert module.Carwash().car_a.engine_class is module.Engine
+
     def test_modified_property(self, sandbox):
         module_file = sandbox / "module.py"
         module_file.touch()
@@ -1193,3 +1324,256 @@ class TestMisc(TestBase):
         reloader = PartialReloader(module, sandbox, logger)
         with pytest.raises(ZeroDivisionError):
             reloader.run()
+
+
+class TestDictionaries(TestBase):
+    def test_change_value(self, sandbox):
+        module_file = sandbox / "module.py"
+        module_file.touch()
+        module_file.write_text(
+            dedent(
+            """
+            car_data = {
+            "engine_power": 200,
+            "max_speed": 150,
+            "seats": 4
+            }
+            """
+            )
+        )
+
+        module = load_module(module_file, sandbox)
+        assert module.car_data["engine_power"] == 200
+
+        module_file.write_text(
+            dedent(
+                """
+                car_data = {
+                "engine_power": 250,
+                "max_speed": 150,
+                "seats": 4
+                }
+                """
+            )
+        )
+
+        reloader = PartialReloader(module, sandbox, logger)
+        reloader.run()
+        assert_actions(
+            reloader,
+            ['Update: DictionaryItem: module.car_data.engine_power'],
+        )
+
+        assert module.car_data["engine_power"] == 250
+
+    def test_change_key(self, sandbox):
+        module_file = sandbox / "module.py"
+        module_file.touch()
+        module_file.write_text(
+            dedent(
+            """
+            car_data = {
+            "engine_power": 200,
+            "max_speed": 150,
+            "seats": 4
+            }
+            """
+            )
+        )
+
+        module = load_module(module_file, sandbox)
+        assert module.car_data["engine_power"] == 200
+
+        module_file.write_text(
+            dedent(
+                """
+                car_data = {
+                "engine_force": 200,
+                "max_speed": 150,
+                "seats": 4
+                }
+                """
+            )
+        )
+
+        reloader = PartialReloader(module, sandbox, logger)
+        reloader.run()
+        assert_actions(
+            reloader,
+            ['Add: DictionaryItem: module.car_data.engine_force',
+             'Delete: DictionaryItem: module.car_data.engine_power']
+        )
+
+        assert "engine_power" not in module.car_data
+        assert module.car_data["engine_force"] == 200
+
+    def test_change_key_and_value(self, sandbox):
+        module_file = sandbox / "module.py"
+        module_file.touch()
+        module_file.write_text(
+            dedent(
+            """
+            car_data = {
+            "engine_power": 200,
+            "max_speed": 150,
+            "seats": 4
+            }
+            """
+            )
+        )
+
+        module = load_module(module_file, sandbox)
+        assert module.car_data["engine_power"] == 200
+
+        module_file.write_text(
+            dedent(
+                """
+                car_data = {
+                "engine_force": 250,
+                "max_speed": 150,
+                "seats": 4
+                }
+                """
+            )
+        )
+
+        reloader = PartialReloader(module, sandbox, logger)
+        reloader.run()
+        assert_actions(
+            reloader,
+            ['Add: DictionaryItem: module.car_data.engine_force',
+             'Delete: DictionaryItem: module.car_data.engine_power']
+        )
+
+        assert "engine_power" not in module.car_data
+        assert module.car_data["engine_force"] == 250
+
+    def test_add(self, sandbox):
+        module_file = sandbox / "module.py"
+        module_file.touch()
+        module_file.write_text(
+            dedent(
+            """
+            some_var = 1
+            """
+            )
+        )
+
+        module = load_module(module_file, sandbox)
+        assert not hasattr(module, "car_data")
+
+        module_file.write_text(
+            dedent(
+                """
+                some_var = 1
+            
+                car_data = {
+                "engine_power": 200,
+                "max_speed": 150,
+                "seats": 4
+                }
+                """
+            )
+        )
+
+        reloader = PartialReloader(module, sandbox, logger)
+        reloader.run()
+        assert_actions(
+            reloader,
+            ['Add: DictionaryItem: module.car_data.engine_power',
+             'Add: Dictionary: module.car_data',
+             'Add: DictionaryItem: module.car_data.max_speed',
+             'Add: DictionaryItem: module.car_data.seats'], ignore_order=True
+        )
+
+        assert hasattr(module, "car_data")
+
+    def test_delete(self, sandbox):
+        module_file = sandbox / "module.py"
+        module_file.touch()
+        module_file.write_text(
+            dedent(
+                """
+                some_var = 1
+
+                car_data = {
+                "engine_power": 200,
+                "max_speed": 150,
+                "seats": 4
+                }
+                """
+            )
+        )
+
+        module = load_module(module_file, sandbox)
+        assert hasattr(module, "car_data")
+
+        module_file.write_text(
+            dedent(
+                """
+                some_var = 1
+                """
+            )
+        )
+
+        reloader = PartialReloader(module, sandbox, logger)
+        reloader.run()
+        assert_actions(
+            reloader,
+            ['Delete: Dictionary: module.car_data',
+             'Delete: DictionaryItem: module.car_data.engine_power',
+             'Delete: DictionaryItem: module.car_data.max_speed',
+             'Delete: DictionaryItem: module.car_data.seats'], ignore_order=True
+        )
+
+        assert not hasattr(module, "car_data")
+
+    def test_rename(self, sandbox):
+        module_file = sandbox / "module.py"
+        module_file.touch()
+        module_file.write_text(
+            dedent(
+                """
+                some_var = 1
+
+                car_data = {
+                "engine_power": 200,
+                "max_speed": 150,
+                "seats": 4
+                }
+                """
+            )
+        )
+
+        module = load_module(module_file, sandbox)
+        assert hasattr(module, "car_data")
+
+        module_file.write_text(
+            dedent(
+                """
+                some_var = 1
+
+                car_specs = {
+                "engine_power": 200,
+                "max_speed": 150,
+                "seats": 4
+                }
+                """
+            )
+        )
+
+        reloader = PartialReloader(module, sandbox, logger)
+        reloader.run()
+        assert_actions(
+            reloader,
+            ['Add: DictionaryItem: module.car_specs.max_speed',
+             'Add: DictionaryItem: module.car_specs.engine_power',
+             'Add: DictionaryItem: module.car_specs.seats',
+             'Add: Dictionary: module.car_specs',
+             'Delete: DictionaryItem: module.car_data.engine_power',
+             'Delete: DictionaryItem: module.car_data.max_speed',
+             'Delete: Dictionary: module.car_data',
+             'Delete: DictionaryItem: module.car_data.seats'], ignore_order=True
+        )
+
+        assert not hasattr(module, "car_data")
