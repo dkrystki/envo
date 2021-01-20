@@ -151,7 +151,7 @@ def _import(name, globals=None, locals=None, fromlist=None, level=_default_level
 
         # If this is a nested import for a reloadable (source-based) module,
         # we append ourself to our parent's dependency list.
-        if hasattr(m, '__file__'):
+        if hasattr(m, '__file__') and "__name__" in parent:
             dep = Dependency(parent["__name__"], fromlist)
             _dependencies[m.__name__].append(dep)
 

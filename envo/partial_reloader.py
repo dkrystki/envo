@@ -1,21 +1,18 @@
 import inspect
 import os
-import sys
-from copy import copy
-from types import ModuleType
-
-from multi_key_dict import multi_key_dict
-
-from dataclasses import dataclass, field
-from pathlib import Path
-from textwrap import dedent
-from typing import Any, Dict, List, Optional, Type, Set, Callable
-
-from envo import dependency_watcher
-from envo.dependency_watcher import Dependency
-from envo import misc
 from collections import OrderedDict
 from collections import defaultdict
+from copy import copy
+from pathlib import Path
+from textwrap import dedent
+from types import ModuleType
+from typing import Any, Dict, List, Optional, Type, Set, Callable
+
+import sys
+from dataclasses import dataclass, field
+from envo import dependency_watcher
+from envo import misc
+from envo.dependency_watcher import Dependency
 
 dataclass = dataclass(repr=False)
 
@@ -135,24 +132,14 @@ class Object:
     def flat(self) -> Dict[str, Any]:
         return {self.full_name: self}
 
-    def _is_ignored(self, name: str) -> bool:
+    @classmethod
+    def _is_ignored(cls, name: str) -> bool:
         name = str(name)
-        if name.startswith("__") and name.endswith("__") and "hash" in name:
+        if name.startswith("__") and name.endswith("__"):
             return True
 
         return name in [
-            "__module__",
-            "__dataclass_params__",
-            "__spec__",
-            "__loader__",
-            "__file__",
-            "__annotations__",
-            "__doc__",
-            "__weakref__",
-            "__dict__",
-            "__origin__",
-            "None",
-            "__dataclass_fields__",
+            "None"
         ]
 
     def safe_compare(self, other: "Object"):
@@ -294,6 +281,10 @@ class Function(FinalObj):
     def get_func(cls, obj: Any) -> Any:
         return obj
 
+    @classmethod
+    def _is_ignored(cls, name: str) -> bool:
+        return False
+
 
 @dataclass
 class Method(Function):
@@ -334,13 +325,26 @@ class ContainerObj(Object):
         return False
 
     def _python_obj_to_obj_classes(self, name: str, obj: Any) -> Dict[str, Type[Object]]:
-        raise NotImplementedError()
+        if self.is_foreign_obj(obj):
+            return {name: Variable}
+
+        if obj in [o.python_obj for o in self.module.flat.values()]:
+            return {name: Variable}
+
+        if inspect.isclass(obj):
+            # Check if it's definition
+            return {name: Class}
+
+        if inspect.isfunction(obj):
+            return {name: Function}
+
+        if isinstance(obj, dict):
+            return {name: Dictionary}
+
+        return {}
 
     def _collect_objs(self) -> None:
         for n, o in self.get_dict().items():
-            if self._is_ignored(n):
-                continue
-
             # break recursions
             if any(o is p for p in self.get_parents_obj_flat() + [self.python_obj]):
                 continue
@@ -348,6 +352,9 @@ class ContainerObj(Object):
             obj_classes = self._python_obj_to_obj_classes(n, o)
 
             for n, obj_class in obj_classes.items():
+                if obj_class._is_ignored(n):
+                    continue
+
                 self.children[n] = obj_class(
                     o, parent=self, name=n, reloader=self.reloader, module=self.module
                 )
@@ -391,12 +398,17 @@ class Class(ContainerObj):
         return ret
 
     def _python_obj_to_obj_classes(self, name: str, obj: Any) -> Dict[str, Type[Object]]:
-        if inspect.isfunction(obj):
-            return {name: Function}
+        # If already process means it's just a reference
+        if obj in [o.python_obj for o in self.module.flat.values()]:
+            return {name: ClassAttribute}
+
+        ret = super()._python_obj_to_obj_classes(name, obj)
+        if ret:
+            return ret
+
         if inspect.ismethod(obj) or inspect.ismethoddescriptor(obj):
             return {name: Method}
-        if inspect.isclass(obj):
-            return {name: Class}
+
         if isinstance(obj, property):
             ret = {name: PropertyGetter}
 
@@ -404,8 +416,6 @@ class Class(ContainerObj):
                 setter_name = name + "__setter__"
                 ret[setter_name] = PropertySetter
             return ret
-        if isinstance(obj, dict):
-            return {name: Dictionary}
 
         return {name: ClassAttribute}
 
@@ -436,6 +446,26 @@ class Dictionary(ContainerObj):
 
 @dataclass
 class Variable(FinalObj):
+    @dataclass
+    class Update(FinalObj.Update):
+        def execute(self) -> None:
+            self.pre_execute()
+            if hasattr(self.new_object.python_obj, "__module__") and self.new_object.python_obj.__module__ == f"{self.reloader.module_obj.__package__}.{self.reloader.module_obj.__name__}":
+                if inspect.isclass(self.new_object.python_obj):
+                    python_obj_name_to_obj = {str(o.python_obj): o for o in self.reloader.old_module.flat.values()}
+                    self.new_object.python_obj = python_obj_name_to_obj[str(self.new_object.python_obj)].python_obj
+                elif inspect.isfunction(self.new_object.python_obj):
+                    python_obj_name_to_obj = {str(o.python_obj): o for o in self.reloader.old_module.flat.values()}
+                    self.new_object.python_obj = python_obj_name_to_obj[str(self.new_object.python_obj)].python_obj
+                else:
+                    self.new_object.python_obj.__class__ = self.old_object.python_obj.__class__
+
+            setattr(
+                self.old_object.parent.python_obj,
+                self.old_object.name,
+                self.new_object.python_obj,
+            )
+
     def get_actions_for_update(
         self, new_object: "Variable"
     ) -> List["Action"]:
@@ -464,18 +494,6 @@ class Variable(FinalObj):
 
 @dataclass
 class ClassAttribute(Variable):
-    @dataclass
-    class Update(Variable.Update):
-        def execute(self) -> None:
-            self.pre_execute()
-            setattr(
-                self.old_object.parent.python_obj,
-                self.old_object.name,
-                self.new_object.python_obj,
-            )
-            if hasattr(self.new_object.python_obj, "__module__"):
-                self.new_object.python_obj.__class__ = self.old_object.python_obj.__class__
-
     def get_actions_for_update(
         self, new_object: "Variable"
     ) -> List["Action"]:
@@ -584,15 +602,10 @@ class Module(ContainerObj):
         super().__post_init__()
 
     def _python_obj_to_obj_classes(self, name: str, obj: Any) -> Dict[str, Type[Object]]:
-        if self.is_foreign_obj(obj):
-            return {name: Variable}
+        ret = super()._python_obj_to_obj_classes(name, obj)
+        if ret:
+            return ret
 
-        if inspect.isfunction(obj):
-            return {name: Function}
-        if inspect.isclass(obj):
-            return {name: Class}
-        if isinstance(obj, dict):
-            return {name: Dictionary}
         if inspect.ismodule(obj):
             return {name: Import}
 
@@ -605,13 +618,9 @@ class Module(ContainerObj):
         ret = [self.Update(self.reloader, self)]
         return ret
 
-    def _is_ignored(self, name: str) -> bool:
-        ignored = super()._is_ignored(name)
-        if ignored:
-            return True
-
-        ret = name in ["__builtins__", "__name__", "__package__", "__cached__"]
-        return ret
+    @classmethod
+    def _is_ignored(cls, name: str) -> bool:
+        return False
 
     @property
     def final_objs(self) -> List[FinalObj]:

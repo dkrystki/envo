@@ -452,6 +452,68 @@ class TestGlobabVariable(TestBase):
         assert module.global_var1 == 1
         assert module.global_var2 == 2
 
+    def test_fixes_class_references(self, sandbox):
+        module_file = sandbox / "module.py"
+        module_file.touch()
+        source = """
+        class Car:
+            pass
+        
+        car_class = None
+        """
+        module_file.write_text(dedent(source))
+
+        module = load_module(module_file, sandbox)
+        old_Car_class = module.Car
+        new_source = """
+        class Car:
+            pass
+        
+        car_class = Car
+        """
+        module_file.write_text(dedent(new_source))
+
+        reloader = PartialReloader(module, sandbox, logger)
+        reloader.run()
+        assert_actions(
+            reloader,
+            ['Update: Variable: module.car_class'],
+        )
+
+        assert module.Car is old_Car_class
+        assert module.car_class is module.Car
+
+    def test_fixes_function_references(self, sandbox):
+        module_file = sandbox / "module.py"
+        module_file.touch()
+        source = """
+        def fun():
+            return 10
+
+        car_fun = None
+        """
+        module_file.write_text(dedent(source))
+
+        module = load_module(module_file, sandbox)
+        old_fun = module.fun
+        new_source = """
+        def fun():
+            return 10
+
+        car_fun = fun
+        """
+        module_file.write_text(dedent(new_source))
+
+        reloader = PartialReloader(module, sandbox, logger)
+        reloader.run()
+        assert_actions(
+            reloader,
+            ['Update: Variable: module.car_fun'],
+        )
+
+        assert module.fun is old_fun
+        assert module.car_fun is module.fun
+
     def test_modified_global_var(self, sandbox):
         Path("__init__.py").touch()
         module_file = sandbox / "module.py"
@@ -655,6 +717,39 @@ class TestClasses(TestBase):
         assert module.CarwashBase.sprinklers_n == 55
         assert module.Carwash.sprinklers_n == 77
         assert print_sprinklers_id == id(module.CarwashBase.print_sprinklers)
+
+    def test_type_as_attribute(self, sandbox):
+        module_file = sandbox / "module.py"
+        module_file.touch()
+        module_file.write_text(
+            dedent(
+        """
+        class Carwash:
+            name_type = int
+        """
+            )
+        )
+
+        module = load_module(module_file, sandbox)
+        assert module.Carwash.name_type is int
+
+        module_file.write_text(
+            dedent(
+                """
+                class Carwash:
+                    name_type = str
+                """
+            )
+        )
+
+        reloader = PartialReloader(module, sandbox, logger)
+        reloader.run()
+        assert_actions(
+            reloader,
+            ['Update: Variable: module.Carwash.name_type']
+        )
+
+        assert module.Carwash.name_type is str
 
     def test_added_class(self, sandbox):
         module_file = sandbox / "module.py"
@@ -886,6 +981,41 @@ class TestClasses(TestBase):
         assert module.Carwash().print_sprinklers() == "There are 5 sprinklers."
         assert print_sprinklers_id == id(module.Carwash.print_sprinklers)
 
+    def test_modified_repr(self, sandbox):
+        module_file = sandbox / "module.py"
+        module_file.touch()
+        module_file.write_text(
+            dedent(
+                """
+            class Carwash:
+                def __repr__(self) -> str:
+                    return "Carwash"
+            """
+            )
+        )
+
+        module = load_module(module_file, sandbox)
+        assert repr(module.Carwash()) == "Carwash"
+
+        module_file.write_text(
+            dedent(
+                """
+            class Carwash:
+                def __repr__(self) -> str:
+                    return "MyCarwash"
+            """
+            )
+        )
+
+        reloader = PartialReloader(module, sandbox, logger)
+        reloader.run()
+        assert_actions(
+            reloader,
+            ['Update: Function: module.Carwash.__repr__']
+        )
+
+        assert repr(module.Carwash()) == "MyCarwash"
+
     def test_uses_other_classes(self, sandbox):
         module_file = sandbox / "module.py"
         module_file.touch()
@@ -902,6 +1032,7 @@ class TestClasses(TestBase):
                 colour: str
                 engine = Engine()
                 engine_class = None
+                other_none_var = None
 
                 def __init__(self, colour: str) -> str:
                     self.colour = colour
@@ -917,6 +1048,7 @@ class TestClasses(TestBase):
         )
 
         module = load_module(module_file, sandbox)
+        old_engine_class = module.Engine
 
         # First edit
         module_file.write_text(
@@ -932,6 +1064,7 @@ class TestClasses(TestBase):
                     colour: str
                     engine = Engine("BMW")
                     engine_class = Engine
+                    other_none_var = None
 
                     def __init__(self, colour: str) -> str:
                         self.colour = colour
@@ -951,14 +1084,17 @@ class TestClasses(TestBase):
         assert_actions(
             reloader,
             ['Update: ClassAttribute: module.Car.engine',
+             'Update: ClassAttribute: module.Car.engine_class',
              'Update: ClassAttribute: module.Carwash.car_a',
              'Update: Function: module.Carwash.__init__']
         )
 
+        assert module.Engine is old_engine_class
         assert isinstance(module.Carwash().car_b, module.Car)
         assert isinstance(module.Carwash().car_c, module.Car)
         assert isinstance(module.Carwash().car_a, module.Car)
         assert isinstance(module.Carwash().car_a.engine, module.Engine)
+        assert module.Car.engine_class is module.Engine
         assert module.Carwash().car_a.engine_class is module.Engine
 
     def test_modified_property(self, sandbox):

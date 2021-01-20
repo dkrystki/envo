@@ -93,7 +93,12 @@ class FilesWatcher(FileSystemEventHandler):
         self.observer.schedule(self, str(self.se.root), recursive=True)
 
     def on_any_event(self, event: FileSystemEvent):
-        event = event.__class__(src_path=Path(event.src_path).resolve())
+        kwargs = event.__dict__
+
+        for k in kwargs.keys():
+            kwargs[k.lstrip("_")] = Path(kwargs.pop(k)).resolve()
+
+        event = event.__class__(**kwargs)
         self.calls.on_event(event)
 
     def flush(self) -> None:

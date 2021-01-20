@@ -262,8 +262,8 @@ class Logger:
 
         exc_type, exc_value, traceback = sys.exc_info()
         trace = Traceback.extract(exc_type, exc_value, traceback)
-        # trace.stacks[0].frames = trace.stacks[0].frames[-1:]
-        # trace.stacks = [trace.stacks[0]]
+        trace.stacks[0].frames = trace.stacks[0].frames[-1:]
+        trace.stacks = [trace.stacks[0]]
         traceback_obj = Traceback(
             trace=trace,
             width=200,
