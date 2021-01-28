@@ -226,7 +226,7 @@ def render_py_file(template_path: Path, output: Path, context: Dict[str, Any]) -
 
 
 def path_to_module_name(path: Path, package_root: Path) -> str:
-    rel_path = path.resolve().absolute().relative_to(package_root.resolve().absolute().parent)
+    rel_path = path.resolve().absolute().relative_to(package_root.resolve())
     ret = str(rel_path).replace(".py", "").replace("/", ".").replace("\\", ".")
     ret = ret.replace(".__init__", "")
     return ret
@@ -238,6 +238,7 @@ def import_from_file(path: Path, package_root: Path) -> Any:
     spec = importlib.util.spec_from_loader(module_name, loader)
     module = importlib.util.module_from_spec(spec)
     loader.exec_module(module)
+
     return module
 
 

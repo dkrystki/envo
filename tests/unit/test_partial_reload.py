@@ -1,4 +1,9 @@
+import builtins
+import importlib
+import importlib.machinery
+import importlib.util
 import sys
+from copy import copy
 
 from pathlib import Path
 from textwrap import dedent
@@ -7,8 +12,8 @@ from typing import Any, List
 import pytest
 
 from envo import dependency_watcher
-from envo.misc import import_from_file
-from envo.partial_reloader import PartialReloader
+from envo.misc import import_from_file, path_to_module_name
+from envo.partial_reloader import PartialReloader, Module
 from tests.unit import utils
 
 from envo import logger
@@ -24,27 +29,28 @@ def assert_actions(reloader: PartialReloader, actions_names: List[str], ignore_o
         assert actions_str == actions_names
 
 
-def load_module(path: Path, root: Path) -> Any:
-    # loader = MyLoader("", "")
-    # path.write_text(loader.get_data(str(path)))
-
-    module = import_from_file(path, root)
-    if path.stem == "__init__":
-        module.__name__ = (path.absolute()).parent.name
-    else:
-        module.__name__ = path.stem
-    sys.modules[f"{module.__name__}"] = module
+def load_module(name: str) -> Any:
+    module = builtins.__import__(name)
+    for deps in list(dependency_watcher._dependencies.values()):
+        this_module_i =  next((i for i, d in enumerate(deps) if d.module_file == Path(__file__)), None)
+        if this_module_i is not None:
+            deps.pop(this_module_i)
     return module
 
 
 class TestBase:
     @pytest.fixture(autouse=True)
     def setup(self, sandbox):
+        sys.path.insert(0, str(sandbox.parent))
         dependency_watcher._reset()
 
         for n, m in sys.modules.copy().items():
             if hasattr(m, "__file__") and Path(m.__file__).parent == sandbox:
                 sys.modules.pop(n)
+
+        yield
+
+        sys.path.remove(str(sandbox.parent))
 
 
 class TestFunctions(TestBase):
@@ -61,7 +67,7 @@ class TestFunctions(TestBase):
         """
         module_file.write_text(dedent(source))
 
-        module = load_module(module_file, sandbox)
+        module = load_module("module")
 
         utils.add_function(
             """
@@ -95,7 +101,7 @@ class TestFunctions(TestBase):
             return f"{arg1}_{arg2}_{id(global_var)}"
         """
         module_file.write_text(dedent(source))
-        module = load_module(module_file, sandbox)
+        module = load_module("module")
 
         fun_id_before = id(module.fun)
 
@@ -139,7 +145,7 @@ class TestFunctions(TestBase):
             )
         )
 
-        module = load_module(module_file, sandbox)
+        module = load_module("module")
 
         assert hasattr(module, "fun1")
         assert hasattr(module, "fun2")
@@ -172,7 +178,7 @@ class TestFunctions(TestBase):
             )
         )
 
-        module = load_module(module_file, sandbox)
+        module = load_module("module")
 
         assert hasattr(module, "fun1")
         assert not hasattr(module, "fun_renamed")
@@ -216,7 +222,7 @@ class TestFunctions(TestBase):
             )
         )
 
-        module = load_module(module_file, sandbox)
+        module = load_module("module")
         car_class_id = id(module.Car)
         fun_id = id(module.fun)
 
@@ -267,7 +273,7 @@ class TestFunctions(TestBase):
             )
         )
 
-        module = load_module(module_file, sandbox)
+        module = load_module("module")
         assert module.fun() == 15
 
         module_file.write_text(
@@ -306,7 +312,7 @@ class TestFunctions(TestBase):
             )
         )
 
-        module = load_module(module_file, sandbox)
+        module = load_module("module")
         assert module.fun() == 15
 
         module_file.write_text(
@@ -342,7 +348,7 @@ class TestFunctions(TestBase):
             )
         )
 
-        module = load_module(module_file, sandbox)
+        module = load_module("module")
         assert module.fun() == 10
 
         module_file.write_text(
@@ -372,11 +378,11 @@ class TestGlobalVariable(TestBase):
         init_file = Path("__init__.py")
         init_file.touch()
         init_file.write_text(dedent("""
-        import carwash
-        import car
-        import accounting
-        import client
-        import boss
+        from . import carwash
+        from . import car
+        from . import accounting
+        from . import client
+        from . import boss
         """))
 
         carwash_file_module = sandbox / "carwash.py"
@@ -389,7 +395,7 @@ class TestGlobalVariable(TestBase):
         car_module_file = sandbox / "car.py"
         car_module_file.touch()
         car_module_file.write_text(dedent("""
-        from carwash import sprinkler_n
+        from .carwash import sprinkler_n
     
         car_sprinklers = sprinkler_n / 3
         """))
@@ -397,7 +403,7 @@ class TestGlobalVariable(TestBase):
         accounting_module_file = sandbox / "accounting.py"
         accounting_module_file.touch()
         accounting_module_file.write_text(dedent("""
-        from car import car_sprinklers
+        from .car import car_sprinklers
 
         sprinklers_from_accounting = car_sprinklers * 10
         """))
@@ -405,7 +411,7 @@ class TestGlobalVariable(TestBase):
         client_module = sandbox / "client.py"
         client_module.touch()
         client_module.write_text(dedent("""
-                import carwash
+                from . import carwash
 
                 client_car_sprinklers = carwash.sprinkler_n / 3
                 """))
@@ -413,12 +419,12 @@ class TestGlobalVariable(TestBase):
         boss_module = sandbox / "boss.py"
         boss_module.touch()
         boss_module.write_text(dedent("""
-                        import carwash
+                        from . import carwash
 
                         actual_money = carwash.money * 5
                         """))
 
-        module = load_module(init_file, sandbox)
+        module = load_module("sandbox")
 
         assert module.carwash.sprinkler_n == 3
         assert module.car.car_sprinklers == 1
@@ -428,17 +434,17 @@ class TestGlobalVariable(TestBase):
                 money = 1e3
                 """))
 
-        reloader = PartialReloader(module.carwash, sandbox, logger)
+        reloader = PartialReloader(module.carwash, sandbox.parent, logger)
         reloader.run()
-        assert_actions(reloader, ['Update: Variable: carwash.sprinkler_n',
-                                  'Update: Module: car',
-                                  'Update: Variable: car.sprinkler_n',
-                                  'Update: Variable: car.car_sprinklers',
-                                  'Update: Module: accounting',
-                                  'Update: Variable: accounting.car_sprinklers',
-                                  'Update: Variable: accounting.sprinklers_from_accounting',
-                                  'Update: Module: client',
-                                  'Update: Variable: client.client_car_sprinklers'])
+        assert_actions(reloader, ['Update: Variable: sandbox.carwash.sprinkler_n',
+                                  'Update: Module: sandbox.car',
+                                  'Update: Variable: sandbox.car.sprinkler_n',
+                                  'Update: Variable: sandbox.car.car_sprinklers',
+                                  'Update: Module: sandbox.accounting',
+                                  'Update: Variable: sandbox.accounting.car_sprinklers',
+                                  'Update: Variable: sandbox.accounting.sprinklers_from_accounting',
+                                  'Update: Module: sandbox.client',
+                                  'Update: Variable: sandbox.client.client_car_sprinklers'])
 
         assert module.carwash.sprinkler_n == 6
         assert module.car.sprinkler_n == 6
@@ -451,8 +457,8 @@ class TestGlobalVariable(TestBase):
         init_file = Path("__init__.py")
         init_file.touch()
         init_file.write_text(dedent("""
-           import carwash
-           import car
+           from . import carwash
+           from . import car
            """))
 
         carwash_file_module = sandbox / "carwash.py"
@@ -464,12 +470,12 @@ class TestGlobalVariable(TestBase):
         car_module = sandbox / "car.py"
         car_module.touch()
         car_module.write_text(dedent("""
-           from carwash import *
+           from .carwash import *
 
            car_sprinklers = sprinkler_n / 3
            """))
 
-        module = load_module(init_file, sandbox)
+        module = load_module("sandbox")
 
         assert module.carwash.sprinkler_n == 3
         assert module.car.car_sprinklers == 1
@@ -478,12 +484,12 @@ class TestGlobalVariable(TestBase):
                    sprinkler_n = 6
                    """))
 
-        reloader = PartialReloader(module.carwash, sandbox, logger)
+        reloader = PartialReloader(module.carwash, sandbox.parent, logger)
         reloader.run()
-        assert_actions(reloader, ['Update: Variable: carwash.sprinkler_n',
-                                  'Update: Module: car',
-                                  'Update: Variable: car.sprinkler_n',
-                                  'Update: Variable: car.car_sprinklers'])
+        assert_actions(reloader, ['Update: Variable: sandbox.carwash.sprinkler_n',
+                                  'Update: Module: sandbox.car',
+                                  'Update: Variable: sandbox.car.sprinkler_n',
+                                  'Update: Variable: sandbox.car.car_sprinklers'])
 
         assert module.carwash.sprinkler_n == 6
         assert module.car.car_sprinklers == 2
@@ -533,8 +539,7 @@ class TestGlobalVariable(TestBase):
                                   'Update: Variable: container.sprinkler_n',
                                   'Update: Module: car',
                                   'Update: Variable: car.sprinkler_n',
-                                  'Update: Variable: car.car_sprinklers',
-                                  'Update: Module: car'])
+                                  'Update: Variable: car.car_sprinklers'])
 
         assert module.carwash.sprinkler_n == 6
         assert module.car.car_sprinklers == 2
@@ -547,7 +552,7 @@ class TestGlobalVariable(TestBase):
         """
         module_file.write_text(dedent(source))
 
-        module = load_module(module_file, sandbox)
+        module = load_module("module")
         new_source = """
         global_var1 = 1
         global_var2 = 2
@@ -580,7 +585,7 @@ class TestGlobalVariable(TestBase):
         """
         module_file.write_text(dedent(source))
 
-        module = load_module(module_file, sandbox)
+        module = load_module("module")
         old_Car_class = module.Car
         new_source = """
         class Car:
@@ -611,7 +616,7 @@ class TestGlobalVariable(TestBase):
         """
         module_file.write_text(dedent(source))
 
-        module = load_module(module_file, sandbox)
+        module = load_module("module")
         old_fun = module.fun
         new_source = """
         def fun():
@@ -660,7 +665,7 @@ class TestGlobalVariable(TestBase):
             )
         )
 
-        module = load_module(module_file, sandbox)
+        module = load_module("module")
 
         print_sprinkler_id = id(module.print_sprinkler)
         lambda_fun_id = id(module.sample_dict["lambda_fun"])
@@ -703,7 +708,7 @@ class TestGlobalVariable(TestBase):
             )
         )
 
-        module = load_module(module_file, sandbox)
+        module = load_module("module")
 
         assert hasattr(module, "sprinkler_n")
         assert hasattr(module, "cars_n")
@@ -722,12 +727,12 @@ class TestGlobalVariable(TestBase):
 
 
 class TestClasses(TestBase):
-    def test_modified_class_attr_with_dependencies(self, sandbox):
+    def test_modified_class_variable_with_dependencies(self, sandbox):
         init_file = Path("__init__.py")
         init_file.touch()
         init_file.write_text(dedent("""
-                import carwash1
-                import car1
+                from . import carwash1
+                from . import car1
                 """))
 
         carwash_file_module = sandbox / "carwash1.py"
@@ -745,18 +750,16 @@ class TestClasses(TestBase):
         car_module.write_text(dedent(
             """
             import math
-            from carwash1 import Carwash
+            from .carwash1 import Carwash
             
             class Car: 
                 car_sprinklers = Carwash.sprinkler_n / 3
             """))
 
-        module = load_module(init_file, sandbox)
-        carwash_module = load_module(carwash_file_module, sandbox)
-        car_module = load_module(car_module, sandbox)
+        module = load_module("sandbox")
 
-        assert carwash_module.Carwash.sprinkler_n == 3
-        assert car_module.Car.car_sprinklers == 1
+        assert module.carwash1.Carwash.sprinkler_n == 3
+        assert module.car1.Car.car_sprinklers == 1
 
         carwash_file_module.write_text(dedent(
             """
@@ -766,14 +769,14 @@ class TestClasses(TestBase):
                 sprinkler_n = 6
             """))
 
-        reloader = PartialReloader(carwash_module, sandbox, logger)
+        reloader = PartialReloader(module.carwash1, sandbox.parent, logger)
         reloader.run()
-        assert_actions(reloader, ['Update: ClassVariable: carwash1.Carwash.sprinkler_n',
-                                  'Update: Module: car1',
-                                  'Update: ClassVariable: car1.Car.car_sprinklers'])
+        assert_actions(reloader, ['Update: ClassVariable: sandbox.carwash1.Carwash.sprinkler_n',
+                                  'Update: Module: sandbox.car1',
+                                  'Update: ClassVariable: sandbox.car1.Car.car_sprinklers'])
 
-        assert carwash_module.Carwash.sprinkler_n == 6
-        assert car_module.Car.car_sprinklers == 2
+        assert module.carwash1.Carwash.sprinkler_n == 6
+        assert module.car1.Car.car_sprinklers == 2
 
     def test_modified_class_attr(self, sandbox):
         module_file = sandbox / "module.py"
@@ -798,7 +801,7 @@ class TestClasses(TestBase):
             )
         )
 
-        module = load_module(module_file, sandbox)
+        module = load_module("module")
         print_sprinklers_id = id(module.CarwashBase.print_sprinklers)
 
         module_file.write_text(
@@ -851,7 +854,7 @@ class TestClasses(TestBase):
             )
         )
 
-        module = load_module(module_file, sandbox)
+        module = load_module("module")
 
         module_file.write_text(
             dedent(
@@ -872,7 +875,7 @@ class TestClasses(TestBase):
         reloader.run()
         assert_actions(
             reloader,
-            ['Add: Method: module.Carwash.__init__']
+            ['Delete: Class: module.Carwash', 'Add: Class: module.Carwash']
         )
 
         assert module.Carwash(30).car_n == 30
@@ -894,7 +897,7 @@ class TestClasses(TestBase):
             )
         )
 
-        module = load_module(module_file, sandbox)
+        module = load_module("module")
 
         module_file.write_text(
             dedent(
@@ -933,7 +936,7 @@ class TestClasses(TestBase):
             )
         )
 
-        module = load_module(module_file, sandbox)
+        module = load_module("module")
         assert module.Carwash.name_type is int
 
         module_file.write_text(
@@ -965,7 +968,7 @@ class TestClasses(TestBase):
             )
         )
 
-        module = load_module(module_file, sandbox)
+        module = load_module("module")
 
         module_file.write_text(
             dedent(
@@ -1006,10 +1009,10 @@ class TestClasses(TestBase):
             )
         )
 
-        module = load_module(module_file, sandbox)
+        module = load_module("module")
 
         reloader = PartialReloader(module, sandbox, logger)
-        assert list(reloader.old_module.flat.keys()) == ['module', 'module.Carwash', 'module.Carwash.class_attr']
+        reloader.get_actions()
 
     def test_recursion_two_deep(self, sandbox):
         module_file = sandbox / "module.py"
@@ -1029,14 +1032,10 @@ class TestClasses(TestBase):
             )
         )
 
-        module = load_module(module_file, sandbox)
+        module = load_module("module")
 
         reloader = PartialReloader(module, sandbox, logger)
-        assert list(reloader.old_module.flat.keys()) == ['module',
- 'module.Carwash',
- 'module.Carwash.class_attr',
- 'module.Carwash.Car',
- 'module.Carwash.Car.class_attr2']
+        reloader.get_actions()
 
     def test_added_class_attr(self, sandbox):
         module_file = sandbox / "module.py"
@@ -1053,7 +1052,7 @@ class TestClasses(TestBase):
             )
         )
 
-        module = load_module(module_file, sandbox)
+        module = load_module("module")
 
         assert hasattr(module.Carwash, "sprinklers_n")
         assert not hasattr(module.Carwash, "cars_n")
@@ -1100,7 +1099,7 @@ class TestClasses(TestBase):
             )
         )
 
-        module = load_module(module_file, sandbox)
+        module = load_module("module")
 
         assert hasattr(module.Carwash, "sprinklers_n")
         assert hasattr(module.Carwash, "cars_n")
@@ -1147,7 +1146,7 @@ class TestClasses(TestBase):
             )
         )
 
-        module = load_module(module_file, sandbox)
+        module = load_module("module")
         reffered_print_sprinklers_cls = module.Carwash.print_sprinklers_cls
         assert module.Carwash.print_sprinklers_cls() == "There is one sprinkler (Cls)."
         assert reffered_print_sprinklers_cls() == "There is one sprinkler (Cls)."
@@ -1197,7 +1196,7 @@ class TestClasses(TestBase):
             )
         )
 
-        module = load_module(module_file, sandbox)
+        module = load_module("module")
         assert repr(module.Carwash()) == "Carwash"
 
         module_file.write_text(
@@ -1250,7 +1249,7 @@ class TestClasses(TestBase):
             )
         )
 
-        module = load_module(module_file, sandbox)
+        module = load_module("module")
         old_engine_class = module.Engine
 
         # First edit
@@ -1318,7 +1317,7 @@ class TestClasses(TestBase):
             )
         )
 
-        module = load_module(module_file, sandbox)
+        module = load_module("module")
         assert module.Carwash().sprinklers_n == 3
         assert module.Carwash().cars_n == 5
 
@@ -1365,7 +1364,7 @@ class TestClasses(TestBase):
             )
         )
 
-        module = load_module(module_file, sandbox)
+        module = load_module("module")
         assert module.Carwash().sprinklers_n == 10
 
         module_file.write_text(
@@ -1404,7 +1403,7 @@ class TestClasses(TestBase):
             )
         )
 
-        module = load_module(module_file, sandbox)
+        module = load_module("module")
 
         module_file.write_text(
             dedent(
@@ -1438,7 +1437,7 @@ class TestClasses(TestBase):
             )
         )
 
-        module = load_module(module_file, sandbox)
+        module = load_module("module")
 
         assert hasattr(module.Carwash, "fun1")
         assert hasattr(module.Carwash, "fun2")
@@ -1515,7 +1514,7 @@ class TestModules(TestBase):
             )
         )
 
-        module = load_module(module_file, sandbox)
+        module = load_module("module")
 
         assert not hasattr(module, "math")
 
@@ -1552,7 +1551,7 @@ class TestModules(TestBase):
             )
         )
 
-        module = load_module(module_file, sandbox)
+        module = load_module("module")
 
         assert hasattr(module, "math")
 
@@ -1624,7 +1623,7 @@ class TestMisc(TestBase):
             )
         )
 
-        module = load_module(module_file, sandbox)
+        module = load_module("module")
 
         module_file.write_text(
             dedent(
@@ -1650,7 +1649,7 @@ class TestMisc(TestBase):
             )
         )
 
-        module = load_module(module_file, sandbox)
+        module = load_module("module")
 
         module_file.write_text(
             dedent(
@@ -1681,7 +1680,7 @@ class TestDictionaries(TestBase):
             )
         )
 
-        module = load_module(module_file, sandbox)
+        module = load_module("module")
         assert module.car_data["engine_power"] == 200
 
         module_file.write_text(
@@ -1720,7 +1719,7 @@ class TestDictionaries(TestBase):
             )
         )
 
-        module = load_module(module_file, sandbox)
+        module = load_module("module")
         assert module.car_data["engine_power"] == 200
 
         module_file.write_text(
@@ -1761,7 +1760,7 @@ class TestDictionaries(TestBase):
             )
         )
 
-        module = load_module(module_file, sandbox)
+        module = load_module("module")
         assert module.car_data["engine_power"] == 200
 
         module_file.write_text(
@@ -1798,7 +1797,7 @@ class TestDictionaries(TestBase):
             )
         )
 
-        module = load_module(module_file, sandbox)
+        module = load_module("module")
         assert not hasattr(module, "car_data")
 
         module_file.write_text(
@@ -1841,7 +1840,7 @@ class TestDictionaries(TestBase):
             )
         )
 
-        module = load_module(module_file, sandbox)
+        module = load_module("module")
         assert hasattr(module, "car_data")
 
         module_file.write_text(
@@ -1878,7 +1877,7 @@ class TestDictionaries(TestBase):
             )
         )
 
-        module = load_module(module_file, sandbox)
+        module = load_module("module")
         assert hasattr(module, "car_data")
 
         module_file.write_text(

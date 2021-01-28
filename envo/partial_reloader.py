@@ -216,7 +216,7 @@ class Object:
         ret = []
 
         full_name_without_module = self.full_name[len(self.module.full_name)+1:]
-        for m in dependency_watcher.get_dependencies(module_full_name=self.module.full_name,
+        for m in dependency_watcher.get_dependencies(module_file=self.module.python_obj.__file__,
                                                      used_obj=full_name_without_module):
             module = Module(m, reloader=self.reloader)
             ret.append(Module.Update(self.reloader, module))
@@ -418,46 +418,47 @@ class ContainerObj(Object):
         return ret
 
     def get_actions_for_update(self, new_object: Object) -> List[Action]:
-        ret = []
+        try:
+            ret = []
 
-        a = self.children
-        b = new_object.children
-        new_objects_names = b.keys() - a.keys()
-        new_objects = {n: b[n] for n in new_objects_names}
-        for o in new_objects.values():
-            ret.extend(
-                o.get_actions_for_add(reloader=self.reloader, parent=self, obj=o)
-            )
+            a = self.children
+            b = new_object.children
+            new_objects_names = b.keys() - a.keys()
+            new_objects = {n: b[n] for n in new_objects_names}
+            for o in new_objects.values():
+                ret.extend(
+                    o.get_actions_for_add(reloader=self.reloader, parent=self, obj=o)
+                )
 
-        deleted_objects_names = a.keys() - b.keys()
-        deleted_objects = {n: a[n] for n in deleted_objects_names}
-        for o in deleted_objects.values():
-            parent = o.parent
-            ret.extend(
-                o.get_actions_for_delete(reloader=self.reloader, parent=parent, obj=o)
-            )
+            deleted_objects_names = a.keys() - b.keys()
+            deleted_objects = {n: a[n] for n in deleted_objects_names}
+            for o in deleted_objects.values():
+                parent = o.parent
+                ret.extend(
+                    o.get_actions_for_delete(reloader=self.reloader, parent=parent, obj=o)
+                )
 
-        for n, o in a.items():
-            # if deleted
-            if n not in b:
-                continue
+            for n, o in a.items():
+                # if deleted
+                if n not in b:
+                    continue
 
-            if o is self:
-                continue
+                if o is self:
+                    continue
 
-            ret.extend(o.get_actions_for_update(new_object=b[n]))
+                ret.extend(o.get_actions_for_update(new_object=b[n]))
 
-        return ret
+            return ret
+        except ParentReloadNeeded:
+            return [*self.get_actions_for_delete(self.reloader, self.parent, self),
+                    *self.get_actions_for_add(self.reloader, self.parent, self),
+                    *self.get_actions_for_dependent_modules()]
 
 
 @dataclass
 class Class(ContainerObj):
     @dataclass
-    class Update(Action):
-        parent: Optional["ContainerObj"]
-        old_object: "Object"
-        new_object: Optional["Object"]
-
+    class Update(ContainerObj.Update):
         def __repr__(self) -> str:
             return f"Update: {repr(self.old_object)}"
 
@@ -483,6 +484,15 @@ class Class(ContainerObj):
 
             self.old_object.python_obj.__mro_override__ = tuple(fixed_mro)
             self.old_object.python_obj.__bases__ = tuple(fixed_bases)
+
+    @dataclass
+    class Add(ContainerObj.Add):
+        def __repr__(self) -> str:
+            return f"Add: {repr(self.object)}"
+
+        def execute(self) -> None:
+            self.pre_execute()
+            exec(self.object.source, self.parent.module.python_obj.__dict__)
 
     def get_actions_for_update(
         self, new_object: "Class"
@@ -556,8 +566,8 @@ class Method(Function):
     def get_actions_for_add(
             self, reloader: "PartialReloader", parent: "ContainerObj", obj: "Object"
     ) -> List["Action"]:
-        if hasattr(self.parent.python_obj, self.name):
-            if getattr(self.parent.python_obj, self.name).__code__.co_freevars != obj.python_obj.__code__.co_freevars:
+        if hasattr(parent.python_obj, self.name):
+            if getattr(parent.python_obj, self.name).__code__.co_freevars != obj.python_obj.__code__.co_freevars:
                 raise ParentReloadNeeded()
 
         return super().get_actions_for_add(reloader, parent, obj)
@@ -618,7 +628,8 @@ class ClassVariable(Variable):
             )
         ]
 
-        ret.extend(self.get_actions_for_dependent_modules())
+        if isinstance(self.parent.parent, Module):
+            ret.extend(self.get_actions_for_dependent_modules())
         return ret
 
     @classmethod
@@ -634,7 +645,6 @@ class ClassVariable(Variable):
         ]
 
         return ret
-
 
 
 @dataclass
@@ -717,8 +727,8 @@ class Module(ContainerObj):
         def execute(self) -> None:
             self.pre_execute()
             reloader = PartialReloader(self.module.python_obj, self.reloader.root, self.reloader.logger)
-            reloader.run()
-            self.reloader.applied_actions.extend(reloader.applied_actions)
+            applied_actions = reloader.run()
+            self.reloader.applied_actions.extend(applied_actions)
 
         def __repr__(self) -> str:
             return f"Update: {repr(self.module)}"
@@ -765,64 +775,44 @@ class Module(ContainerObj):
 
 
 class PartialReloader:
-    module_obj: Any
+    file: Path
+    module_objs: List[ModuleType]
     applied_actions: List[Action]
     logger: Any
 
-    def __init__(self, module_obj: Any, root: Path, logger: Any) -> None:
-        logger.debug(f"Creating partial reloader for {root}")
+    def __init__(self, module_obj: ModuleType, root: Path, logger: Any) -> None:
+        self.file = Path(module_obj.__file__)
+        logger.debug(f"Creating partial reloader for {module_obj}")
         self.root = root.resolve()
-        self.module_obj = module_obj
+        self.module_objs = dependency_watcher.path_to_modules[module_obj.__file__]
         self.logger = logger
         self.applied_actions = []
 
-    def _is_user_module(self, module: Any):
-        if not hasattr(module, "__file__"):
-            return False
-
-        ret = self.module_dir in Path(module.__file__).parents
-        return ret
-
-    @property
-    def module_dir(self) -> Path:
-        ret = Path(self.module_obj.__file__).parent
-        return ret
-
-    @property
-    def source_files(self) -> List[str]:
-        ret = [str(p) for p in self.module_dir.glob("**/*.py")]
-        return ret
-
-    @property
-    def old_module(self) -> Module:
-        return Module(self.module_obj, reloader=self, name=f"{self.module_obj.__name__}")
-
-    @property
-    def new_module(self) -> Module:
+    def get_new_module(self, old_module: Module) -> Module:
         dependency_watcher.disable()
-        module_obj = misc.import_from_file(Path(self.module_obj.__file__), self.root)
+        module_obj = misc.import_from_file(self.file, self.root)
         dependency_watcher.enable()
 
         return Module(
             module_obj,
             reloader=self,
-            name=f"{self.module_obj.__name__}",
+            name=old_module.name,
         )
 
     def get_actions(self) -> List[Action]:
-        self.applied_actions = []
+        actions = []
 
-        old_module = self.old_module
-        new_module = self.new_module
-
-        actions = old_module.get_actions_for_update(new_module)
+        for m in self.module_objs:
+            old_module = Module(m, reloader=self, name=f"{m.__name__}")
+            new_module = self.get_new_module(old_module)
+            actions.extend(old_module.get_actions_for_update(new_module))
         return actions
 
     def run(self) -> List[Action]:
         """
         :return: True if succeded False i unable to reload
         """
-
+        self.applied_actions = []
         for a in self.get_actions():
             a.execute()
 

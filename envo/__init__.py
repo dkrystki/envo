@@ -17,6 +17,8 @@ install()
 console = Console()
 console._force_terminal = True
 
+import envo.e2e
+
 from envo import e2e
 from envo.logging import logger
 from envo.devops import *
