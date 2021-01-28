@@ -1,8 +1,13 @@
 # flake8: noqa E402, F401
 
 import warnings
+import sys
+# sys.stderr = lambda x: None
 
 warnings.warn = lambda *args, **kwargs: None
+warnings._showwarnmsg = lambda x: None
+
+# warnings.simplefilter("ignore")
 
 from rich.traceback import install
 from rich.console import Console

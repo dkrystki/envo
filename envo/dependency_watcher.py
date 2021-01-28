@@ -1,6 +1,7 @@
 import re
 from pathlib import Path
 from types import ModuleType
+from copy import copy
 
 from dataclasses import dataclass
 
@@ -123,62 +124,75 @@ def get_this_frame_n() -> int:
             return ret
         ret += 1
 
-import sys
-from os.path import isdir
-from importlib import invalidate_caches
-from importlib.abc import SourceLoader
-from importlib.machinery import FileFinder
+# import sys
+# from os.path import isdir
+# from importlib import invalidate_caches
+# from importlib.abc import SourceLoader
+# from importlib.machinery import FileFinder
+#
+# from importlib.machinery import SourceFileLoader
+#
+# class MyLoader(SourceLoader):
+#     def __init__(self, fullname, path):
+#         self.fullname = fullname
+#         self.path = path
+#
+#     def get_filename(self, fullname):
+#         return self.path
+#
+#     def get_data(self, filename):
+#         """exec_module is already defined for us, we just have to provide a way
+#         of getting the source code of the module"""
+#
+#         with open(filename, "rb") as f:
+#             data = f.read()
+#
+#
+#         parsed = ast.parse(data)
+#         classes = [o for o in ast.walk(parsed) if isinstance(o, ast.ClassDef)]
+#         methods_body_line_numbers = []
+#         for c in classes:
+#             methods = [o for o in c.body if isinstance(o, ast.FunctionDef)]
+#             for m in methods:
+#                 first_a = next((a for a in m.body if type(a) in [ast.Expr, ast.Assign, ast.Return, ast.Pass, ast.Call,
+#                                                                  ast.AnnAssign]), None)
+#                 if not first_a:
+#                     continue
+#                 methods_body_line_numbers.append(first_a.lineno)
+#
+#         lines = data.splitlines(keepends=True)
+#         for l in methods_body_line_numbers:
+#             index = l-1
+#             line = lines[index]
+#             content = line.lstrip()
+#             spaces = line[0:len(line) - len(content)]
+#             lines[index] = spaces+b"__class__;"+content
+#
+#         data = b"".join(lines)
+#
+#         return data
 
 
-class MyLoader(SourceLoader):
-    def __init__(self, fullname, path):
-        self.fullname = fullname
-        self.path = path
-
-    def get_filename(self, fullname):
-        return self.path
-
-    def get_data(self, filename):
-        """exec_module is already defined for us, we just have to provide a way
-        of getting the source code of the module"""
-
-        with open(filename) as f:
-            data = f.read()
-
-        if "site-packages" in filename:
-            return data
-
-        parsed = ast.parse(data)
-        classes = [o for o in parsed.body if isinstance(o, ast.ClassDef)]
-        methods_body_line_numbers = []
-        for c in classes:
-            methods = [o for o in c.body if isinstance(o, ast.FunctionDef)]
-            for m in methods:
-                first_a = next((a for a in m.body if type(a) in [ast.Expr, ast.Assign, ast.Return, ast.Pass, ast.Call,
-                                                                 ast.AnnAssign]), None)
-                if not first_a:
-                    continue
-                methods_body_line_numbers.append(first_a.lineno)
-
-        lines = data.splitlines(keepends=True)
-        for l in methods_body_line_numbers:
-            index = l-1
-            line = lines[index]
-            content = line.lstrip()
-            spaces = line[0:len(line) - len(content)]
-            lines[index] = f"{spaces}__class__;{content}"
-
-        data = "".join(lines)
-
-        return data
-
-
-def install():
-    # insert the path hook ahead of other path hooks
-    sys.path_hooks.insert(0, FileFinder.path_hook((MyLoader, [".py"])))
-    # clear any loaders that might already be in use by the FileFinder
-    # sys.path_importer_cache.clear()
-    # invalidate_caches()
+# once = False
+#
+# def install():
+#     global once
+#     if once:
+#         return
+#     # insert the path hook ahead of other path hooks
+#     hook_index, hook = next((i, h) for i, h in enumerate(sys.path_hooks) if "FileFinder" in h.__name__)
+#
+#     def new_hook(path: str):
+#         finder = hook(path)
+#         if "site-packages" in path or "python3" in path:
+#             return finder
+#         py_loader_index = next(i for i, l in enumerate(finder._loaders) if ".py" in l[0])
+#         finder._loaders.insert(0, (".py", MyLoader))
+#         return finder
+#
+#     sys.path_hooks[hook_index] = new_hook
+#
+#     once = True
 
 
 def _import(name, globals=None, locals=None, fromlist=None, level=_default_level):
@@ -217,4 +231,4 @@ def _import(name, globals=None, locals=None, fromlist=None, level=_default_level
 
     return base
 
-install()
+# install()

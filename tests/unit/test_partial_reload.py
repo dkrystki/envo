@@ -7,7 +7,6 @@ from typing import Any, List
 import pytest
 
 from envo import dependency_watcher
-from envo.dependency_watcher import MyLoader
 from envo.misc import import_from_file
 from envo.partial_reloader import PartialReloader
 from tests.unit import utils
@@ -916,7 +915,7 @@ class TestClasses(TestBase):
         reloader.run()
         assert_actions(
             reloader,
-            ['Update: Class: module.Carwash', 'Update: Method: module.Carwash.__init__']
+            ['Update: Class: module.Carwash']
         )
 
         assert isinstance(module.Carwash(30), module.CarwashBase)
@@ -986,9 +985,7 @@ class TestClasses(TestBase):
         reloader.run()
         assert_actions(
             reloader,
-            ['Add: ClassVariable: module.Carwash.sprinklers_n',
-             'Add: Class: module.Carwash',
-             'Add: Method: module.Carwash.print_sprinklers'], ignore_order=True
+            ['Add: Class: module.Carwash']
         )
 
         assert module.Carwash.sprinklers_n == 55
@@ -1822,10 +1819,7 @@ class TestDictionaries(TestBase):
         reloader.run()
         assert_actions(
             reloader,
-            ['Add: DictionaryItem: module.car_data.engine_power',
-             'Add: Dictionary: module.car_data',
-             'Add: DictionaryItem: module.car_data.max_speed',
-             'Add: DictionaryItem: module.car_data.seats'], ignore_order=True
+            ['Add: Dictionary: module.car_data']
         )
 
         assert hasattr(module, "car_data")
@@ -1862,10 +1856,7 @@ class TestDictionaries(TestBase):
         reloader.run()
         assert_actions(
             reloader,
-            ['Delete: Dictionary: module.car_data',
-             'Delete: DictionaryItem: module.car_data.engine_power',
-             'Delete: DictionaryItem: module.car_data.max_speed',
-             'Delete: DictionaryItem: module.car_data.seats'], ignore_order=True
+            ['Delete: Dictionary: module.car_data']
         )
 
         assert not hasattr(module, "car_data")
@@ -1908,14 +1899,7 @@ class TestDictionaries(TestBase):
         reloader.run()
         assert_actions(
             reloader,
-            ['Add: DictionaryItem: module.car_specs.max_speed',
-             'Add: DictionaryItem: module.car_specs.engine_power',
-             'Add: DictionaryItem: module.car_specs.seats',
-             'Add: Dictionary: module.car_specs',
-             'Delete: DictionaryItem: module.car_data.engine_power',
-             'Delete: DictionaryItem: module.car_data.max_speed',
-             'Delete: Dictionary: module.car_data',
-             'Delete: DictionaryItem: module.car_data.seats'], ignore_order=True
+            ['Add: Dictionary: module.car_specs', 'Delete: Dictionary: module.car_data']
         )
 
         assert not hasattr(module, "car_data")

@@ -20,103 +20,6 @@ dataclass = dataclass(repr=False)
 import builtins
 
 
-_orig_build_class = builtins.__build_class__
-
-
-# needed for changing __bases__ to work
-class __Object__(object):
-    pass
-
-
-class Meta(type):
-    def __new__(cls, cls_name, cls_bases, cls_dict):
-        if not cls_bases or cls_bases == (object,):
-            cls_bases = (__Object__,)
-        out_cls = super().__new__(cls, cls_name, cls_bases, cls_dict)
-        out_cls.__mro_override__ = None
-        out_cls.__bases_override__ = None
-
-        # for n, o in inspect.getmembers(out_cls):
-        #     if not inspect.isfunction(o):
-        #         continue
-        #
-        #     if n != "__init__":
-        #         continue
-        #
-        #     try:
-        #         source = indent(dedent(inspect.getsource(o)), "    ")
-        #         source = source.lstrip()
-        #     except OSError:
-        #         continue
-        #
-        #     builder = dedent(
-        #         f"""
-        #         def __func_builder__():
-        #             __class__ = {out_cls.__name__}
-        #             <<source>>
-        #             return {n}
-        #         """)
-        #
-        #     builder = builder.replace("<<source>>", source)
-        #
-        #     try:
-        #         frame_i = 1
-        #         while True:
-        #             context = sys._getframe(frame_i).f_globals
-        #             if context["__name__"] == out_cls.__module__:
-        #                 break
-        #             frame_i += 1
-        #
-        #         context[out_cls.__name__] = out_cls
-        #         context.update(dict(out_cls.__dict__))
-        #         out={}
-        #         exec(builder,
-        #              context, out)
-        #         setattr(out_cls, n, out["__func_builder__"]())
-        #     except Exception as e:
-        #         pass
-
-        return out_cls
-
-    def mro(cls):
-        default = super().mro()
-        if not hasattr(cls, "__mro_override__") or not cls.__mro_override__:
-            return default
-        else:
-            return cls.__mro_override__
-
-
-def my_build_class(func, name, *bases, **kwargs):
-    if name == "__Object__" or "__file__" not in func.__globals__ or "site_packages" in func.__globals__["__file__"]:
-        return _orig_build_class(func, name, *bases, **kwargs)
-
-    if not any(isinstance(b, type) for b in bases):
-        # a 'regular' class, not a metaclass
-        if 'metaclass' in kwargs:
-            if not isinstance(kwargs['metaclass'], type):
-                # the metaclass is a callable, but not a class
-                orig_meta = kwargs.pop('metaclass')
-                class HookedMeta(Meta):
-                    def __new__(meta, name, bases, attrs):
-                        return orig_meta(name, bases, attrs)
-                kwargs['metaclass'] = HookedMeta
-            else:
-                # There already is a metaclass, insert ours and hope for the best
-                class SubclassedMeta(Meta, kwargs['metaclass']):
-                    pass
-                kwargs['metaclass'] = SubclassedMeta
-        else:
-            kwargs['metaclass'] = Meta
-
-    try:
-        return _orig_build_class(func, name, *bases, **kwargs)
-    except TypeError:
-        pass
-
-
-builtins.__build_class__ = my_build_class
-
-
 def equal(a: Any, b: Any) -> bool:
     try:
         return a.__dict__ == b.__dict__
@@ -134,6 +37,10 @@ equals: Dict[str, Callable] = defaultdict(lambda: equal)
 equals["pandas.core.series.Series"] = lambda a, b: a.equals(b)
 equals["pandas.core.series.Series"] = lambda a, b: a.equals(b)
 equals["pandas.DataFrame"] = lambda a, b: a.equals(b)
+
+
+class ParentReloadNeeded(Exception):
+    pass
 
 
 @dataclass
@@ -312,12 +219,12 @@ class Object:
         for m in dependency_watcher.get_dependencies(module_full_name=self.module.full_name,
                                                      used_obj=full_name_without_module):
             module = Module(m, reloader=self.reloader)
-            ret.extend(module.get_actions_for_update())
+            ret.append(Module.Update(self.reloader, module))
 
         return ret
 
     def is_primitive(self, obj: Any) -> bool:
-        if obj == None:
+        if obj is None:
             return True
 
         ret = any(type(obj) is p for p in [str, bool, int, float])
@@ -364,7 +271,7 @@ class Function(FinalObj):
             ).__code__ = self.new_object.get_func(self.new_object.python_obj).__code__
 
     def get_actions_for_update(
-        self, new_object: "Function", ignore_objects: Optional[List[Object]] = None
+        self, new_object: "Function"
     ) -> List["Action"]:
         if self != new_object:
             return [
@@ -459,7 +366,7 @@ class ContainerObj(Object):
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        self._collect_objs()
+        self._collect_children()
 
     def get_dict(self) -> Dict[str, Any]:
         raise NotImplementedError()
@@ -470,9 +377,6 @@ class ContainerObj(Object):
     def _python_obj_to_obj_classes(self, name: str, obj: Any) -> Dict[str, Type[Object]]:
         if id(obj) in self.module.python_obj_to_objs and not self.is_primitive(obj):
             return {name: Reference}
-
-        if self.is_foreign_obj(obj):
-            return {name: Variable}
 
         if inspect.isclass(obj):
             # Check if it's definition
@@ -486,7 +390,7 @@ class ContainerObj(Object):
 
         return {}
 
-    def _collect_objs(self) -> None:
+    def _collect_children(self) -> None:
         for n, o in self.get_dict().items():
             # break recursions
             if any(o is p for p in self.get_parents_obj_flat() + [self.python_obj]):
@@ -510,6 +414,38 @@ class ContainerObj(Object):
         ret = inspect.getsource(self.python_obj)
         for c in self.children.values():
             ret = ret.replace(c.source, "")
+
+        return ret
+
+    def get_actions_for_update(self, new_object: Object) -> List[Action]:
+        ret = []
+
+        a = self.children
+        b = new_object.children
+        new_objects_names = b.keys() - a.keys()
+        new_objects = {n: b[n] for n in new_objects_names}
+        for o in new_objects.values():
+            ret.extend(
+                o.get_actions_for_add(reloader=self.reloader, parent=self, obj=o)
+            )
+
+        deleted_objects_names = a.keys() - b.keys()
+        deleted_objects = {n: a[n] for n in deleted_objects_names}
+        for o in deleted_objects.values():
+            parent = o.parent
+            ret.extend(
+                o.get_actions_for_delete(reloader=self.reloader, parent=parent, obj=o)
+            )
+
+        for n, o in a.items():
+            # if deleted
+            if n not in b:
+                continue
+
+            if o is self:
+                continue
+
+            ret.extend(o.get_actions_for_update(new_object=b[n]))
 
         return ret
 
@@ -552,7 +488,7 @@ class Class(ContainerObj):
         self, new_object: "Class"
     ) -> List["Action"]:
         if str(self.python_obj.__mro__) == str(new_object.python_obj.__mro__):
-            return []
+            return super().get_actions_for_update(new_object)
 
         return [self.Update(reloader=self.reloader,
                     parent=self.parent,
@@ -601,31 +537,10 @@ class Class(ContainerObj):
 
 @dataclass
 class Method(Function):
-    # @dataclass
-    # class Update(Function.Update):
-    #     def execute(self) -> None:
-    #         self.pre_execute()
-    #         self.old_object.get_func(
-    #             self.old_object.python_obj
-    #         ).__code__ = self.new_object.get_func(self.new_object.python_obj).__code__
-
     @dataclass
     class Add(Function.Add):
         def execute(self) -> None:
-            self.pre_execute()
-            context = dict(self.parent.python_obj.__dict__)
-            source = indent(dedent(inspect.getsource(self.object.python_obj)), "    "*4)
-
-            builder = dedent(
-            f"""
-            def builder():
-                __class__ = {self.parent.name}\n{source}
-                return {self.object.name}
-            """)
-
-            exec(builder,
-                 self.parent.module.python_obj.__dict__, context)
-            setattr(self.parent.python_obj, self.object.name, context["builder"]())
+            super().execute()
 
     class Update(Function.Update):
         def execute(self) -> None:
@@ -634,10 +549,27 @@ class Method(Function):
                 self.old_object.python_obj
             ).__code__ = self.new_object.get_func(self.new_object.python_obj).__code__
 
-
     @classmethod
     def get_func(cls, obj: Any) -> Any:
         return obj
+
+    def get_actions_for_add(
+            self, reloader: "PartialReloader", parent: "ContainerObj", obj: "Object"
+    ) -> List["Action"]:
+        if hasattr(self.parent.python_obj, self.name):
+            if getattr(self.parent.python_obj, self.name).__code__.co_freevars != obj.python_obj.__code__.co_freevars:
+                raise ParentReloadNeeded()
+
+        return super().get_actions_for_add(reloader, parent, obj)
+
+    # def get_actions_for_update(
+    #     self, new_object: "Function"
+    # ) -> List["Action"]:
+    #     if hasattr(self.python_obj, self.name):
+    #         if self.python_obj.__code__.co_freevars != new_object.python_obj.__code__.co_freevars:
+    #             raise ParentReloadNeeded()
+    #
+    #     return super().get_actions_for_update(new_object)
 
 
 @dataclass
@@ -649,11 +581,6 @@ class ClassMethod(Function):
 
 @dataclass
 class Dictionary(ContainerObj):
-    def get_actions_for_update(
-        self, new_object: "Class"
-    ) -> List["Action"]:
-        return []
-
     def get_dict(self) -> Dict[str, Any]:
         return self.python_obj
 
@@ -693,6 +620,21 @@ class ClassVariable(Variable):
 
         ret.extend(self.get_actions_for_dependent_modules())
         return ret
+
+    @classmethod
+    def _is_ignored(cls, name: str) -> bool:
+        if name.startswith("__") and name.endswith("__"):
+            return True
+
+        ret = name in [
+            "_abc_generic_negative_cache",
+            "_abc_registry",
+            "_abc_cache",
+
+        ]
+
+        return ret
+
 
 
 @dataclass
@@ -798,10 +740,6 @@ class Module(ContainerObj):
     def get_dict(self) -> Dict[str, Any]:
         return self.python_obj.__dict__
 
-    def get_actions_for_update(self) -> List["Action"]:
-        ret = [self.Update(self.reloader, self)]
-        return ret
-
     @classmethod
     def _is_ignored(cls, name: str) -> bool:
         return False
@@ -822,39 +760,6 @@ class Module(ContainerObj):
         self.flat[obj.full_name] = obj
         self.python_obj_to_objs[id(obj.python_obj)].append(obj)
 
-    def get_actions(self, obj: Object) -> List[Action]:
-        ret = []
-
-        a = self.flat
-        b = obj.flat
-        new_objects_names = b.keys() - a.keys()
-        new_objects = {n: b[n] for n in new_objects_names}
-        for o in new_objects.values():
-            parent = a.get(o.parent.full_name, b[o.parent.full_name])
-            ret.extend(
-                o.get_actions_for_add(reloader=self.reloader, parent=parent, obj=o)
-            )
-
-        deleted_objects_names = a.keys() - b.keys()
-        deleted_objects = {n: a[n] for n in deleted_objects_names}
-        for o in deleted_objects.values():
-            parent = a[o.parent.full_name]
-            ret.extend(
-                o.get_actions_for_delete(reloader=self.reloader, parent=parent, obj=o)
-            )
-
-        for n, o in a.items():
-            # if deleted
-            if n not in b:
-                continue
-
-            if o is self:
-                continue
-
-            ret.extend(o.get_actions_for_update(new_object=b[n]))
-
-        return ret
-
     def __repr__(self) -> str:
         return f"Module: {self.python_obj.__name__}"
 
@@ -865,6 +770,7 @@ class PartialReloader:
     logger: Any
 
     def __init__(self, module_obj: Any, root: Path, logger: Any) -> None:
+        logger.debug(f"Creating partial reloader for {root}")
         self.root = root.resolve()
         self.module_obj = module_obj
         self.logger = logger
@@ -903,18 +809,21 @@ class PartialReloader:
             name=f"{self.module_obj.__name__}",
         )
 
-    def run(self) -> List[Action]:
-        """
-        :return: True if succeded False i unable to reload
-        """
+    def get_actions(self) -> List[Action]:
         self.applied_actions = []
 
         old_module = self.old_module
         new_module = self.new_module
 
-        actions = old_module.get_actions(new_module)
+        actions = old_module.get_actions_for_update(new_module)
+        return actions
 
-        for a in actions:
+    def run(self) -> List[Action]:
+        """
+        :return: True if succeded False i unable to reload
+        """
+
+        for a in self.get_actions():
             a.execute()
 
         return self.applied_actions
